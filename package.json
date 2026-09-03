@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/*.js && node --check browser/qlik-geojson-extractor.js && node --check examples/*.js && node --check chrome-extension/service-worker.js && node --check chrome-extension/lib/qlik-url.js && node --check chrome-extension/sidepanel/app.js && node --check chrome-extension/core/qlik-geojson-extractor.js",
+    "check": "node --check src/*.js && node --check browser/qlik-geojson-extractor.js && node --check examples/*.js && node --check chrome-extension/service-worker.js && node --check chrome-extension/lib/*.js && node --check chrome-extension/sidepanel/app.js && node --check chrome-extension/core/qlik-geojson-extractor.js",
     "build": "node scripts/build-browser.mjs && node scripts/build-extension.mjs"
   },
   "engines": {

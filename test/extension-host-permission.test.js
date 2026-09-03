@@ -33,3 +33,12 @@ test("Side Panel requests and verifies only the current host before injection", 
   assert.match(source, /await requireCurrentHostAccess\(granted\)/);
   assert.match(source, /world: "MAIN"/);
 });
+
+
+test("Side Panel always injects the extension-owned core before a Qlik command", async () => {
+  const source = await readFile(sidePanelUrl, "utf8");
+
+  assert.match(source, /Always inject the extension-owned bundle/);
+  assert.match(source, /files: \["core\/qlik-geojson-extractor\.js"\]/);
+  assert.doesNotMatch(source, /if \(check\?\.\[0\]\?\.result\) return/);
+});
