@@ -1,3 +1,5 @@
+import { resolveSimpleQlikFieldReference } from "./utils.js";
+
 export function walkPropertyTree(entry, path = "sheet", output = []) {
   if (!entry) return output;
   if (entry.qProperty) output.push({ path, property: entry.qProperty });
@@ -35,16 +37,30 @@ export async function inspectSheet(client, sheetId) {
   return { sheetId, tree, objects, pointLayers };
 }
 
+function resolvedFieldReference(value) {
+  return resolveSimpleQlikFieldReference(value) ?? value ?? null;
+}
+
 export function summarizePointLayers(pointLayers) {
-  return pointLayers.map((item) => ({
-    objectId: item.objectId,
-    layerId: item.layerId,
-    layerIndex: item.layerIndex,
-    isLatLong: !!item.layer?.isLatLong,
-    locationOrLatitude: item.layer?.locationOrLatitude?.key ?? null,
-    longitude: item.layer?.longitude?.key ?? null,
-    visualDimensions: item.layer?.qHyperCubeDef?.qDimensions?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [],
-    measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,
-    maxObjects: item.layer?.maxObjects ?? null
-  }));
+  return pointLayers.map((item) => {
+    const latitudeRaw = item.layer?.locationOrLatitude?.key ?? null;
+    const longitudeRaw = item.layer?.longitude?.key ?? null;
+    const visualDimensionsRaw = item.layer?.qHyperCubeDef?.qDimensions
+      ?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [];
+
+    return {
+      objectId: item.objectId,
+      layerId: item.layerId,
+      layerIndex: item.layerIndex,
+      isLatLong: !!item.layer?.isLatLong,
+      locationOrLatitude: resolvedFieldReference(latitudeRaw),
+      longitude: resolvedFieldReference(longitudeRaw),
+      visualDimensions: visualDimensionsRaw.map(resolvedFieldReference),
+      locationOrLatitudeRaw: latitudeRaw,
+      longitudeRaw,
+      visualDimensionsRaw,
+      measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,
+      maxObjects: item.layer?.maxObjects ?? null
+    };
+  });
 }

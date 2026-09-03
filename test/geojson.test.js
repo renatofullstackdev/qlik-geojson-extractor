@@ -12,8 +12,8 @@ const hyperCube = {
   }]
 };
 
-function cell(qText, qNum, attrs = []) {
-  return { qText, qNum, qAttrExps: { qValues: attrs } };
+function cell(qText, qNum, attrs = [], qIsNull = false) {
+  return { qText, qNum, qIsNull, qAttrExps: { qValues: attrs } };
 }
 
 test("coordinate override fills a missing point and records provenance", () => {
@@ -62,6 +62,32 @@ test("coordinate override guard fails when entity identity changed", () => {
       }
     }
   }, [{ label: "NAME" }], []), /expected NAME=EXPECTED NAME/);
+});
+
+test("Qlik null entity rows are skipped by default instead of reported as missing coordinates", () => {
+  const rows = [
+    [cell("-", Number.NaN, [], true)],
+    [cell("ENTITY A", Number.NaN, [
+      cell("", Number.NaN),
+      cell("-15.8720726", -15.8720726),
+      cell("-48.0144999", -48.0144999)
+    ])]
+  ];
+
+  const result = rowsToPointGeoJSON(rows, hyperCube, { entityKey: "ENTITY_NAME" }, [], []);
+
+  assert.equal(result.featureCollection.features.length, 1);
+  assert.equal(result.missing.length, 0);
+  assert.equal(result.skippedNullEntityCount, 1);
+  assert.deepEqual(result.skippedNullEntities, [{ rowIndex: 0, displayText: "-" }]);
+});
+
+test("null entity rows can be made fatal explicitly", () => {
+  const rows = [[cell("-", Number.NaN, [], true)]];
+  assert.throws(() => rowsToPointGeoJSON(rows, hyperCube, {
+    entityKey: "ENTITY_NAME",
+    skipNullEntities: false
+  }, [], []), /null entity key/);
 });
 
 test("GeoJSON validator accepts valid point collection", () => {

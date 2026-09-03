@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { numberOrNull, validCoordinates, qlikFieldRef, normalizeName } from "../src/utils.js";
+import {
+  normalizeName,
+  numberOrNull,
+  qlikFieldRef,
+  qNumOrText,
+  qTextOrNum,
+  resolveSimpleQlikFieldReference,
+  validCoordinates
+} from "../src/utils.js";
 
- test("numberOrNull supports Brazilian decimal comma", () => {
+test("numberOrNull supports Brazilian decimal comma", () => {
   assert.equal(numberOrNull("-15,83328021"), -15.83328021);
 });
 
@@ -20,4 +28,22 @@ test("qlikFieldRef brackets field names", () => {
 
 test("normalizeName removes accents and punctuation", () => {
   assert.equal(normalizeName("Região Administrativa"), "REGIAO_ADMINISTRATIVA");
+});
+
+test("simple Qlik field references are resolved", () => {
+  assert.equal(resolveSimpleQlikFieldReference("=LATITUDE"), "LATITUDE");
+  assert.equal(resolveSimpleQlikFieldReference("=[ENTITY NAME]"), "ENTITY NAME");
+  assert.equal(resolveSimpleQlikFieldReference("[ENTITY NAME]"), "ENTITY NAME");
+  assert.equal(resolveSimpleQlikFieldReference("LONGITUDE"), "LONGITUDE");
+});
+
+test("complex Qlik expressions are not guessed as field references", () => {
+  assert.equal(resolveSimpleQlikFieldReference("=Only([LATITUDE])"), null);
+  assert.equal(resolveSimpleQlikFieldReference("=Sum([VALUE]) / Count([ID])"), null);
+});
+
+test("Qlik qIsNull cells are null even when qText contains '-'", () => {
+  const value = { qText: "-", qNum: Number.NaN, qIsNull: true };
+  assert.equal(qTextOrNum(value), null);
+  assert.equal(qNumOrText(value), null);
 });

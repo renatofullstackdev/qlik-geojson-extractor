@@ -11,15 +11,68 @@ export function qlikFieldRef(fieldName) {
   return `[${String(fieldName).replace(/]/g, "]]" )}]`;
 }
 
+/**
+ * Resolves Qlik references that are only a direct field reference.
+ *
+ * Examples:
+ *   LATITUDE                -> LATITUDE
+ *   =LATITUDE               -> LATITUDE
+ *   [ENTITY NAME]           -> ENTITY NAME
+ *   =[ENTITY NAME]          -> ENTITY NAME
+ *
+ * Complex expressions are deliberately not guessed:
+ *   =Only([LATITUDE])       -> null
+ */
+export function resolveSimpleQlikFieldReference(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  const hadEquals = raw.startsWith("=");
+  const expression = hadEquals ? raw.slice(1).trim() : raw;
+  if (!expression) return null;
+
+  if (expression.startsWith("[") && expression.endsWith("]")) {
+    const inner = expression.slice(1, -1);
+    let fieldName = "";
+
+    for (let i = 0; i < inner.length; i += 1) {
+      if (inner[i] !== "]") {
+        fieldName += inner[i];
+        continue;
+      }
+
+      if (inner[i + 1] === "]") {
+        fieldName += "]";
+        i += 1;
+        continue;
+      }
+
+      return null;
+    }
+
+    return fieldName || null;
+  }
+
+  if (!hadEquals) return expression;
+
+  // A leading '=' makes the value a Qlik expression. Only accept the
+  // expression when it is clearly a bare field identifier.
+  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression)) {
+    return expression;
+  }
+
+  return null;
+}
+
 export function qTextOrNum(value) {
-  if (!value) return null;
+  if (!value || value.qIsNull === true) return null;
   if (typeof value.qText === "string" && value.qText !== "") return value.qText;
   if (typeof value.qNum === "number" && Number.isFinite(value.qNum)) return value.qNum;
   return null;
 }
 
 export function qNumOrText(value) {
-  if (!value) return null;
+  if (!value || value.qIsNull === true) return null;
   if (typeof value.qNum === "number" && Number.isFinite(value.qNum)) return value.qNum;
   if (typeof value.qText === "string" && value.qText !== "") return value.qText;
   return null;

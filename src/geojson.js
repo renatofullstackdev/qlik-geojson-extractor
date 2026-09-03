@@ -11,12 +11,22 @@ export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measur
   const featureCollection = { type: "FeatureCollection", name: config.name ?? "qlik_points", features: [] };
   const missing = [];
   const appliedOverrides = [];
+  const skippedNullEntities = [];
   const keys = new Set();
 
   rows.forEach((row, rowIndex) => {
     const dimensionCell = row[0];
     const entityKeyValue = qTextOrNum(dimensionCell);
-    if (entityKeyValue === null || entityKeyValue === "") throw new Error(`Row ${rowIndex}: empty entity key.`);
+    if (entityKeyValue === null || entityKeyValue === "") {
+      if (config.skipNullEntities === false) {
+        throw new Error(`Row ${rowIndex}: null entity key.`);
+      }
+      skippedNullEntities.push({
+        rowIndex,
+        displayText: typeof dimensionCell?.qText === "string" ? dimensionCell.qText : null
+      });
+      return;
+    }
     const keyString = String(entityKeyValue);
     if (keys.has(keyString)) throw new Error(`Duplicate entity key: ${keyString}`);
     keys.add(keyString);
@@ -73,7 +83,14 @@ export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measur
     });
   });
 
-  return { featureCollection, missing, appliedOverrides, uniqueKeys: keys.size };
+  return {
+    featureCollection,
+    missing,
+    appliedOverrides,
+    skippedNullEntities,
+    skippedNullEntityCount: skippedNullEntities.length,
+    uniqueKeys: keys.size
+  };
 }
 
 export function validatePointGeoJSON(featureCollection) {

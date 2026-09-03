@@ -132,7 +132,8 @@ export class QlikGeoJSONExtractor {
         ...converted,
         validation,
         rowCount: rows.length,
-        featureCount: converted.featureCollection.features.length
+        featureCount: converted.featureCollection.features.length,
+        skippedNullEntityCount: converted.skippedNullEntities.length
       };
     } finally {
       this.client.close();
