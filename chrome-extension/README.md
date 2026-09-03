@@ -88,3 +88,44 @@ A dimensão visual nunca é promovida silenciosamente a `entityKey`.
 ## Se a guia mudar de host
 
 A permissão é vinculada ao host. Se a guia navegar para outra origem, clique novamente no ícone da extensão nessa nova página e conceda o novo host. Navegações entre apps/sheets no mesmo host não precisam de nova concessão.
+
+## Coordenadas e configuração efetiva
+
+Latitude e longitude são escolhidas em listas de campos reais do app. O campo detectado no `PointLayer` aparece primeiro, mas a seleção permanece explícita. Isso evita que uma expressão textual ou um campo diferente seja enviado por engano como `latitudeField`/`longitudeField`.
+
+Antes de extrair, abra **Configuração efetiva que será enviada ao extrator** e confira pelo menos:
+
+```json
+{
+  "entityKey": "...",
+  "latitudeField": "...",
+  "longitudeField": "...",
+  "properties": []
+}
+```
+
+Se houver entidades reais, mas todas ficarem sem coordenadas, a extensão trata o resultado como erro operacional e não oferece download de um `FeatureCollection` vazio.
+
+## Expressões de propriedade
+
+Além da seleção direta de campos com `Only`, `Concat distinct`, `Max`, `Min` e `Max timestamp`, a extensão permite propriedades com expressão Qlik arbitrária:
+
+```text
+Rótulo: LABEL
+Expressão: Concat(Distinct [FIELD], ', ')
+```
+
+Isso corresponde à configuração programática:
+
+```js
+{
+  label: "LABEL",
+  expression: "Concat(Distinct [FIELD], ', ')"
+}
+```
+
+O valor de `coordinateSourceField` e `coordinateSourceValue` também pode ser configurado pela interface.
+
+## Núcleo determinístico
+
+Antes de cada comando Qlik, a extensão injeta novamente a cópia do bundle pertencente à própria extensão. Ela não reutiliza um `window.QlikGeoJSONExtractor` que possa ter sido colado anteriormente no DevTools. Isso torna o resultado independente do histórico da página.

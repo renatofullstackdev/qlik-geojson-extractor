@@ -94,3 +94,17 @@ The Side Panel recognizes URLs shaped like:
 ```
 
 The prefix before `/sense/app/` is passed to the QIX client as `virtualProxyPath`. If the URL cannot be recognized, IDs remain editable and can be supplied manually.
+
+## Effective extraction configuration
+
+The Side Panel exposes the exact configuration passed to `extract()` before execution. Coordinate controls are field selectors populated from `inspect().fields`; the detected PointLayer fields are preferred but never represented as free-form text.
+
+Custom property expressions are represented separately from direct field aggregations and are merged only when the final extraction configuration is built. This allows the Side Panel to reproduce the same `label + expression` objects supported by the core API.
+
+## Deterministic core injection
+
+The extension always injects `chrome-extension/core/qlik-geojson-extractor.js` before executing a Qlik command. It deliberately does not trust a pre-existing `globalThis.QlikGeoJSONExtractor` because that global may have been created by a stale DevTools bundle. Side Panel behavior therefore depends only on the version shipped with the loaded extension.
+
+## Empty-result safeguard
+
+A technically valid `FeatureCollection` with zero features is not considered a successful operational extraction when the hypercube contains real entity keys and every entity is reported in `missing`. In that case the Side Panel shows an error, preserves diagnostics, and disables download until the coordinate configuration is corrected.

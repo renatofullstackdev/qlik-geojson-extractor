@@ -42,7 +42,9 @@ confirmar latitude/longitude
   ↓
 escolher explicitamente a chave da entidade
   ↓
-selecionar propriedades e medidas
+selecionar propriedades e expressões/medidas
+  ↓
+conferir a configuração efetiva
   ↓
 Gerar GeoJSON
   ↓
@@ -50,6 +52,8 @@ validar resumo e preview
   ↓
 Baixar GeoJSON
 ```
+
+Na extensão, latitude e longitude são selecionadas entre campos reais retornados por `inspect()`, com o campo detectado no `PointLayer` priorizado. A interface também aceita propriedades com `label + expression` e mostra o JSON exato que será enviado a `extract()`. Se houver entidades reais mas nenhuma feição puder ser criada por falta de coordenadas, o resultado é tratado como erro e o download fica bloqueado.
 
 A extensão usa `activeTab` somente para associar o clique do ícone à guia correta e declara hosts HTTP/HTTPS apenas em `optional_host_permissions`. O acesso efetivo é solicitado em tempo de execução para o host Qlik corrente e só é concedido após confirmação do usuário. Ela não declara `<all_urls>` nem `host_permissions`, não envia dados a serviços externos e persiste somente configurações de extração. Consulte `docs/CHROME_EXTENSION.md`.
 
