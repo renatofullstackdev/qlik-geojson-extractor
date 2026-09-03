@@ -28,4 +28,4 @@ The generic extractor never enumerates record values unless the caller explicitl
 
 The optional `chrome-extension/` directory provides a Manifest V3 Side Panel around the same browser bundle. It does not fork QIX behavior. `scripts/build-extension.mjs` copies the generated browser bundle into `chrome-extension/core/`, and the Side Panel injects that core into the active Qlik tab using `chrome.scripting` in the `MAIN` world.
 
-The extension intentionally uses temporary `activeTab` access instead of persistent host permissions. Configuration may be persisted locally, but extracted GeoJSON is not written to extension storage. See `CHROME_EXTENSION.md`.
+The extension uses `activeTab` to bind an explicit toolbar invocation to a tab, then requests the exact Qlik host through `optional_host_permissions` before injecting the core. It does not declare persistent `host_permissions`. Configuration may be persisted locally, but extracted GeoJSON is not written to extension storage. See `CHROME_EXTENSION.md`.

@@ -27,9 +27,11 @@ No Chrome/Chromium:
 5. abra uma sheet Qlik em que você já esteja autenticado;
 6. clique no ícone **Qlik GeoJSON Extractor**.
 
-O painel lateral tenta detectar `appId`, `sheetId` e virtual proxy diretamente da URL. Depois siga:
+O painel lateral detecta `appId`, `sheetId` e virtual proxy a partir da guia em que o ícone foi acionado. Na primeira utilização de cada host Qlik, clique em **Permitir acesso a este site** e aceite a solicitação do Chrome. Depois siga:
 
 ```text
+Permitir acesso a este site
+  ↓
 Testar conexão
   ↓
 Inspecionar
@@ -49,7 +51,7 @@ validar resumo e preview
 Baixar GeoJSON
 ```
 
-A extensão usa `activeTab` em vez de acesso permanente a todos os sites. Ela não declara `<all_urls>` nem `host_permissions`, não envia dados a serviços externos e persiste somente configurações de extração. Consulte `docs/CHROME_EXTENSION.md`.
+A extensão usa `activeTab` somente para associar o clique do ícone à guia correta e declara hosts HTTP/HTTPS apenas em `optional_host_permissions`. O acesso efetivo é solicitado em tempo de execução para o host Qlik corrente e só é concedido após confirmação do usuário. Ela não declara `<all_urls>` nem `host_permissions`, não envia dados a serviços externos e persiste somente configurações de extração. Consulte `docs/CHROME_EXTENSION.md`.
 
 O fluxo pelo DevTools continua disponível abaixo para diagnóstico avançado e desenvolvimento.
 
