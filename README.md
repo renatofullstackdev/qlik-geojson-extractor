@@ -4,8 +4,6 @@ Toolkit **browser-first** para inspecionar apps do Qlik Sense e extrair camadas 
 
 O fluxo recomendado é usar o **DevTools do navegador na própria página Qlik**, onde você já possui autorização. Para extrair dados não é necessário instalar dependências npm.
 
-> **Política dos exemplos deste projeto:** o único painel concreto usado nos exemplos é o painel público **Locais de Votação do TRE-DF**. Outros casos devem ser tratados com placeholders genéricos, sem registrar identificadores ou dados de painéis internos.
-
 ## O que a ferramenta faz
 
 - obtém o token CSRF do Qlik;
