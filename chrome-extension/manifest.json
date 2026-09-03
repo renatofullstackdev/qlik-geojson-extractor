@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Qlik GeoJSON Extractor",
+  "short_name": "Qlik GeoJSON",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Inspect Qlik Sense PointLayers and export selected latitude/longitude entities to GeoJSON.",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "scripting",
+    "sidePanel",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Qlik GeoJSON Extractor"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

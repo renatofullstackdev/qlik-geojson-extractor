@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qlik GeoJSON Extractor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>Qlik GeoJSON Extractor</h1>
+      <p>Inspecione um PointLayer, escolha a entidade física e gere GeoJSON.</p>
+    </div>
+    <span id="connectionBadge" class="badge neutral">não testado</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="section-title">
+        <h2>1. Página Qlik</h2>
+        <button id="detectButton" class="secondary" type="button">Detectar</button>
+      </div>
+      <p id="pageMessage" class="hint">Abra uma sheet do Qlik e clique no ícone da extensão.</p>
+      <label>App ID
+        <input id="appIdInput" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Sheet ID
+        <input id="sheetIdInput" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Virtual proxy
+        <input id="virtualProxyInput" placeholder="vazio ou /finance" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="button-row">
+        <button id="probeButton" type="button">Testar conexão</button>
+        <button id="inspectButton" type="button">Inspecionar</button>
+      </div>
+      <pre id="probeOutput" class="output compact hidden"></pre>
+    </section>
+
+    <section id="inspectionSection" class="card hidden">
+      <h2>2. Mapa e entidade</h2>
+      <label>PointLayer
+        <select id="layerSelect"></select>
+      </label>
+
+      <div class="grid two">
+        <label>Latitude
+          <input id="latitudeInput" autocomplete="off" spellcheck="false">
+        </label>
+        <label>Longitude
+          <input id="longitudeInput" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+
+      <div id="layerDiagnostic" class="diagnostic"></div>
+
+      <label>Chave da entidade física
+        <select id="entityKeySelect">
+          <option value="">Escolha explicitamente...</option>
+        </select>
+      </label>
+      <p class="hint">A ferramenta sugere candidatos, mas não escolhe a chave silenciosamente.</p>
+    </section>
+
+    <section id="propertiesSection" class="card hidden">
+      <div class="section-title">
+        <h2>3. Propriedades</h2>
+        <span id="selectedPropertyCount" class="badge neutral">0 selecionadas</span>
+      </div>
+      <input id="fieldSearchInput" type="search" placeholder="Filtrar campos..." autocomplete="off">
+      <div id="fieldList" class="field-list"></div>
+    </section>
+
+    <section id="measuresSection" class="card hidden">
+      <div class="section-title">
+        <h2>4. Medidas</h2>
+        <button id="addMeasureButton" class="secondary" type="button">Adicionar medida</button>
+      </div>
+      <p class="hint">Opcional. Informe um rótulo e uma expressão Qlik, por exemplo <code>Count(ID)</code>.</p>
+      <div id="measureList"></div>
+    </section>
+
+    <section id="optionsSection" class="card hidden">
+      <h2>5. Opções</h2>
+      <label>Nome do conjunto / arquivo
+        <input id="datasetNameInput" value="qlik_points" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="check-line">
+        <input id="navigationLinksInput" type="checkbox">
+        <span>Adicionar links Google Maps e Waze</span>
+      </label>
+      <label class="check-line">
+        <input id="requireAllCoordinatesInput" type="checkbox" checked>
+        <span>Falhar se uma entidade real estiver sem coordenadas</span>
+      </label>
+      <label class="check-line">
+        <input id="skipNullEntitiesInput" type="checkbox" checked>
+        <span>Ignorar linhas cuja dimensão Qlik seja nula</span>
+      </label>
+
+      <details>
+        <summary>Correções explícitas de coordenadas</summary>
+        <p class="hint">JSON opcional. Use somente para correções documentadas.</p>
+        <textarea id="coordinateOverridesInput" rows="8" spellcheck="false" placeholder='{"ENTITY_KEY":{"latitude":-15.8,"longitude":-48.1,"source":"manual"}}'></textarea>
+      </details>
+
+      <div class="button-row wrap">
+        <button id="saveConfigButton" class="secondary" type="button">Salvar configuração</button>
+        <button id="loadConfigButton" class="secondary" type="button">Carregar configuração</button>
+        <button id="clearConfigButton" class="secondary danger" type="button">Apagar configuração</button>
+      </div>
+    </section>
+
+    <section id="extractSection" class="card hidden">
+      <h2>6. Extrair</h2>
+      <button id="extractButton" class="primary wide" type="button">Gerar GeoJSON</button>
+      <div id="extractStatus" class="status-line"></div>
+      <div id="resultSummary" class="summary-grid hidden"></div>
+      <details id="missingDetails" class="hidden">
+        <summary>Entidades sem coordenadas</summary>
+        <pre id="missingOutput" class="output"></pre>
+      </details>
+      <details id="skippedDetails" class="hidden">
+        <summary>Linhas nulas ignoradas</summary>
+        <pre id="skippedOutput" class="output"></pre>
+      </details>
+      <details id="previewDetails" class="hidden" open>
+        <summary>Pré-visualização das primeiras feições</summary>
+        <pre id="previewOutput" class="output"></pre>
+      </details>
+      <button id="downloadButton" class="primary wide hidden" type="button">Baixar GeoJSON</button>
+    </section>
+
+    <section class="card privacy">
+      <h2>Privacidade</h2>
+      <p>A extensão usa apenas a guia ativa após ação explícita do usuário. Não solicita <code>&lt;all_urls&gt;</code>, não envia dados a servidores externos e armazena somente configurações, nunca o GeoJSON extraído.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
