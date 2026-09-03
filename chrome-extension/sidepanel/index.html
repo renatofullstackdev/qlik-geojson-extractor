@@ -54,12 +54,13 @@
 
       <div class="grid two">
         <label>Latitude
-          <input id="latitudeInput" autocomplete="off" spellcheck="false">
+          <select id="latitudeInput"></select>
         </label>
         <label>Longitude
-          <input id="longitudeInput" autocomplete="off" spellcheck="false">
+          <select id="longitudeInput"></select>
         </label>
       </div>
+      <p class="hint">Os campos de coordenadas devem ser campos reais do app. O valor detectado no PointLayer é priorizado, mas pode ser alterado explicitamente.</p>
 
       <div id="layerDiagnostic" class="diagnostic"></div>
 
@@ -80,9 +81,18 @@
       <div id="fieldList" class="field-list"></div>
     </section>
 
+    <section id="customPropertiesSection" class="card hidden">
+      <div class="section-title">
+        <h2>4. Expressões de propriedade</h2>
+        <button id="addCustomPropertyButton" class="secondary" type="button">Adicionar expressão</button>
+      </div>
+      <p class="hint">Opcional. Use quando precisar reproduzir algo como <code>{ label: "LABEL", expression: "Concat(Distinct [FIELD], ', ')" }</code>.</p>
+      <div id="customPropertyList"></div>
+    </section>
+
     <section id="measuresSection" class="card hidden">
       <div class="section-title">
-        <h2>4. Medidas</h2>
+        <h2>5. Medidas</h2>
         <button id="addMeasureButton" class="secondary" type="button">Adicionar medida</button>
       </div>
       <p class="hint">Opcional. Informe um rótulo e uma expressão Qlik, por exemplo <code>Count(ID)</code>.</p>
@@ -90,7 +100,7 @@
     </section>
 
     <section id="optionsSection" class="card hidden">
-      <h2>5. Opções</h2>
+      <h2>6. Opções</h2>
       <label>Nome do conjunto / arquivo
         <input id="datasetNameInput" value="qlik_points" autocomplete="off" spellcheck="false">
       </label>
@@ -107,10 +117,24 @@
         <span>Ignorar linhas cuja dimensão Qlik seja nula</span>
       </label>
 
+      <div class="grid two">
+        <label>Campo de origem da coordenada
+          <input id="coordinateSourceFieldInput" value="coordinate_source" autocomplete="off" spellcheck="false">
+        </label>
+        <label>Valor da origem da coordenada
+          <input id="coordinateSourceValueInput" value="Qlik" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+
       <details>
         <summary>Correções explícitas de coordenadas</summary>
         <p class="hint">JSON opcional. Use somente para correções documentadas.</p>
         <textarea id="coordinateOverridesInput" rows="8" spellcheck="false" placeholder='{"ENTITY_KEY":{"latitude":-15.8,"longitude":-48.1,"source":"manual"}}'></textarea>
+      </details>
+
+      <details id="effectiveConfigDetails">
+        <summary>Configuração efetiva que será enviada ao extrator</summary>
+        <pre id="effectiveConfigOutput" class="output compact"></pre>
       </details>
 
       <div class="button-row wrap">
@@ -121,7 +145,7 @@
     </section>
 
     <section id="extractSection" class="card hidden">
-      <h2>6. Extrair</h2>
+      <h2>7. Extrair</h2>
       <button id="extractButton" class="primary wide" type="button">Gerar GeoJSON</button>
       <div id="extractStatus" class="status-line"></div>
       <div id="resultSummary" class="summary-grid hidden"></div>

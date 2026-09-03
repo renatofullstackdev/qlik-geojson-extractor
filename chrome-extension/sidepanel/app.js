@@ -1,13 +1,16 @@
 import { configStorageKey, hostPermissionPattern, parseQlikSenseUrl, safeFilename } from "../lib/qlik-url.js";
+import { buildPropertyDefinitions, coordinateFieldGroups, extractionHealth } from "../lib/extraction-config.js";
 
 const els = Object.fromEntries([
   "connectionBadge", "detectButton", "pageMessage", "hostAccessBadge", "hostAccessButton",
   "appIdInput", "sheetIdInput", "virtualProxyInput", "probeButton", "inspectButton", "probeOutput",
   "inspectionSection", "layerSelect", "latitudeInput", "longitudeInput", "layerDiagnostic", "entityKeySelect",
-  "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "measuresSection",
-  "addMeasureButton", "measureList", "optionsSection", "datasetNameInput", "navigationLinksInput",
-  "requireAllCoordinatesInput", "skipNullEntitiesInput", "coordinateOverridesInput", "saveConfigButton",
-  "loadConfigButton", "clearConfigButton", "extractSection", "extractButton", "extractStatus", "resultSummary",
+  "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "customPropertiesSection",
+  "addCustomPropertyButton", "customPropertyList", "measuresSection", "addMeasureButton", "measureList",
+  "optionsSection", "datasetNameInput", "navigationLinksInput", "requireAllCoordinatesInput", "skipNullEntitiesInput",
+  "coordinateSourceFieldInput", "coordinateSourceValueInput", "coordinateOverridesInput", "effectiveConfigDetails",
+  "effectiveConfigOutput", "saveConfigButton", "loadConfigButton", "clearConfigButton",
+  "extractSection", "extractButton", "extractStatus", "resultSummary",
   "missingDetails", "missingOutput", "skippedDetails", "skippedOutput", "previewDetails", "previewOutput",
   "downloadButton", "toast"
 ].map((id) => [id, document.getElementById(id)]));
@@ -17,6 +20,7 @@ let currentHostPattern = null;
 let hostAccessGranted = false;
 let inspectionReport = null;
 let selectedProperties = new Map();
+let customProperties = [];
 let measures = [];
 let currentResult = null;
 let toastTimer = null;
@@ -241,14 +245,9 @@ async function requireCurrentHostAccess(granted) {
 }
 
 async function ensurePageCore(tabId) {
-  const check = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: () => Boolean(globalThis.QlikGeoJSONExtractor?.QlikGeoJSONExtractor)
-  });
-
-  if (check?.[0]?.result) return;
-
+  // Always inject the extension-owned bundle before each command. A user may
+  // have pasted another/stale QlikGeoJSONExtractor bundle into DevTools;
+  // reusing that global would make Side Panel behavior depend on page history.
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -384,12 +383,15 @@ async function inspect() {
       throw new Error("Nenhum PointLayer foi encontrado nesta sheet.");
     }
     selectedProperties.clear();
+    customProperties = [];
     measures = [];
+    renderCustomProperties();
     renderMeasures();
     renderLayerSelect();
     renderFieldList();
     setVisible(els.inspectionSection, true);
     setVisible(els.propertiesSection, true);
+    setVisible(els.customPropertiesSection, true);
     setVisible(els.measuresSection, true);
     setVisible(els.optionsSection, true);
     setVisible(els.extractSection, true);
@@ -419,13 +421,73 @@ function selectedLayerIndex() {
   return Number.isInteger(value) ? value : 0;
 }
 
+function renderCoordinateSelect(select, detectedField, label) {
+  select.textContent = "";
+  const groups = coordinateFieldGroups(inspectionReport?.fields ?? [], detectedField);
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = `Escolha o campo de ${label.toLowerCase()}...`;
+  select.append(placeholder);
+
+  const used = new Set();
+  if (groups.detected) {
+    const group = document.createElement("optgroup");
+    group.label = "Detectado no PointLayer";
+    const option = document.createElement("option");
+    option.value = groups.detected.name;
+    option.textContent = `${groups.detected.name} · cardinalidade ${groups.detected.cardinality ?? "?"}`;
+    group.append(option);
+    select.append(group);
+    used.add(groups.detected.name);
+  } else if (detectedField) {
+    const group = document.createElement("optgroup");
+    group.label = "Expressão detectada (não é campo direto)";
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = `${detectedField} · escolha abaixo um campo real do app`;
+    option.disabled = true;
+    group.append(option);
+    select.append(group);
+  }
+
+  if (groups.numeric.length) {
+    const group = document.createElement("optgroup");
+    group.label = "Campos numéricos";
+    for (const field of groups.numeric) {
+      const option = document.createElement("option");
+      option.value = field.name;
+      option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`;
+      group.append(option);
+      used.add(field.name);
+    }
+    select.append(group);
+  }
+
+  if (groups.other.length) {
+    const group = document.createElement("optgroup");
+    group.label = "Outros campos";
+    for (const field of groups.other) {
+      if (used.has(field.name)) continue;
+      const option = document.createElement("option");
+      option.value = field.name;
+      option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`;
+      group.append(option);
+    }
+    select.append(group);
+  }
+
+  select.value = groups.detected?.name ?? "";
+}
+
 function applyLayer(index) {
   const layer = inspectionReport.pointLayers[index];
   if (!layer) return;
-  els.latitudeInput.value = layer.locationOrLatitude ?? "";
-  els.longitudeInput.value = layer.longitude ?? "";
+  renderCoordinateSelect(els.latitudeInput, layer.locationOrLatitude ?? "", "Latitude");
+  renderCoordinateSelect(els.longitudeInput, layer.longitude ?? "", "Longitude");
   renderDiagnostic(index);
   renderEntityOptions(index);
+  updateEffectiveConfigPreview();
 }
 
 function layerDiagnostic(index) {
@@ -566,9 +628,11 @@ function renderFieldList() {
       else selectedProperties.delete(field.name);
       select.disabled = !checkbox.checked;
       updateSelectedPropertyCount();
+      updateEffectiveConfigPreview();
     });
     select.addEventListener("change", () => {
       if (checkbox.checked) selectedProperties.set(field.name, select.value);
+      updateEffectiveConfigPreview();
     });
 
     row.append(checkbox, label, select);
@@ -589,9 +653,66 @@ function updateSelectedPropertyCount() {
   els.selectedPropertyCount.textContent = `${selectedProperties.size} selecionada${selectedProperties.size === 1 ? "" : "s"}`;
 }
 
+function addCustomProperty(property = { label: "", expression: "" }) {
+  customProperties.push({
+    id: crypto.randomUUID(),
+    label: property.label ?? "",
+    expression: property.expression ?? ""
+  });
+  renderCustomProperties();
+  updateEffectiveConfigPreview();
+}
+
+function renderCustomProperties() {
+  els.customPropertyList.textContent = "";
+  for (const property of customProperties) {
+    const row = document.createElement("div");
+    row.className = "measure-row";
+
+    const labelField = document.createElement("label");
+    labelField.textContent = "Rótulo da propriedade";
+    const labelInput = document.createElement("input");
+    labelInput.value = property.label;
+    labelInput.placeholder = "LABEL";
+    labelInput.addEventListener("input", () => {
+      property.label = labelInput.value;
+      updateEffectiveConfigPreview();
+    });
+    labelField.append(labelInput);
+
+    const expressionField = document.createElement("label");
+    expressionField.textContent = "Expressão Qlik";
+    const expressionInput = document.createElement("input");
+    expressionInput.value = property.expression;
+    expressionInput.placeholder = "Concat(Distinct [FIELD], ', ')";
+    expressionInput.addEventListener("input", () => {
+      property.expression = expressionInput.value;
+      updateEffectiveConfigPreview();
+    });
+    expressionField.append(expressionInput);
+
+    const actions = document.createElement("div");
+    actions.className = "measure-actions";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-measure";
+    remove.textContent = "Remover";
+    remove.addEventListener("click", () => {
+      customProperties = customProperties.filter((item) => item.id !== property.id);
+      renderCustomProperties();
+      updateEffectiveConfigPreview();
+    });
+    actions.append(remove);
+
+    row.append(labelField, expressionField, actions);
+    els.customPropertyList.append(row);
+  }
+}
+
 function addMeasure(measure = { label: "", expression: "" }) {
   measures.push({ id: crypto.randomUUID(), label: measure.label ?? "", expression: measure.expression ?? "" });
   renderMeasures();
+  updateEffectiveConfigPreview();
 }
 
 function renderMeasures() {
@@ -605,7 +726,10 @@ function renderMeasures() {
     const labelInput = document.createElement("input");
     labelInput.value = measure.label;
     labelInput.placeholder = "COUNT_RECORDS";
-    labelInput.addEventListener("input", () => { measure.label = labelInput.value; });
+    labelInput.addEventListener("input", () => {
+      measure.label = labelInput.value;
+      updateEffectiveConfigPreview();
+    });
     labelField.append(labelInput);
 
     const expressionField = document.createElement("label");
@@ -613,7 +737,10 @@ function renderMeasures() {
     const expressionInput = document.createElement("input");
     expressionInput.value = measure.expression;
     expressionInput.placeholder = "Count(ID)";
-    expressionInput.addEventListener("input", () => { measure.expression = expressionInput.value; });
+    expressionInput.addEventListener("input", () => {
+      measure.expression = expressionInput.value;
+      updateEffectiveConfigPreview();
+    });
     expressionField.append(expressionInput);
 
     const actions = document.createElement("div");
@@ -625,6 +752,7 @@ function renderMeasures() {
     remove.addEventListener("click", () => {
       measures = measures.filter((item) => item.id !== measure.id);
       renderMeasures();
+      updateEffectiveConfigPreview();
     });
     actions.append(remove);
 
@@ -666,19 +794,43 @@ function buildExtractionConfig() {
     }
   }
 
+  const properties = buildPropertyDefinitions(
+    [...selectedProperties.entries()],
+    customProperties
+  );
+
+  const coordinateSourceField = els.coordinateSourceFieldInput.value.trim();
+  const coordinateSourceValue = els.coordinateSourceValueInput.value.trim();
+
   return {
     appId,
     name: els.datasetNameInput.value.trim() || "qlik_points",
     entityKey,
     latitudeField,
     longitudeField,
-    properties: [...selectedProperties.entries()].map(([field, aggregation]) => ({ field, aggregation })),
+    properties,
     measures: validMeasures,
     navigationLinks: els.navigationLinksInput.checked,
     requireAllCoordinates: els.requireAllCoordinatesInput.checked,
     skipNullEntities: els.skipNullEntitiesInput.checked,
+    coordinateSourceField: coordinateSourceField || "coordinate_source",
+    coordinateSourceValue: coordinateSourceValue || "Qlik",
     coordinateOverrides: parseOverrides()
   };
+}
+
+function updateEffectiveConfigPreview() {
+  if (!els.effectiveConfigOutput) return;
+  try {
+    if (!inspectionReport) {
+      els.effectiveConfigOutput.textContent = "Inspecione a sheet para montar a configuração.";
+      return;
+    }
+    const config = buildExtractionConfig();
+    els.effectiveConfigOutput.textContent = pretty(config);
+  } catch (error) {
+    els.effectiveConfigOutput.textContent = `Configuração incompleta: ${error.message}`;
+  }
 }
 
 async function extract() {
@@ -690,11 +842,22 @@ async function extract() {
 
   try {
     const config = buildExtractionConfig();
+    els.effectiveConfigOutput.textContent = pretty(config);
     currentResult = await runQlik("extract", config);
-    els.extractStatus.textContent = "GeoJSON gerado e validado.";
     renderResult(currentResult);
-    setVisible(els.downloadButton, true);
-    showToast(`${currentResult.featureCount} feição(ões) GeoJSON gerada(s).`);
+
+    const health = extractionHealth(currentResult);
+    els.extractStatus.textContent = health.message;
+    els.extractStatus.dataset.state = health.level;
+    setVisible(els.downloadButton, health.allowDownload);
+
+    if (health.level === "error") {
+      showToast(health.message, "error");
+    } else if (health.level === "warning") {
+      showToast(health.message, "error");
+    } else {
+      showToast(`${currentResult.featureCount} feição(ões) GeoJSON gerada(s).`);
+    }
   } catch (error) {
     els.extractStatus.textContent = error.message;
     if (Array.isArray(error.missing) && error.missing.length) {
@@ -793,11 +956,14 @@ function serializableUiConfig() {
     longitudeField: els.longitudeInput.value.trim(),
     entityKey: els.entityKeySelect.value,
     properties: [...selectedProperties.entries()].map(([field, aggregation]) => ({ field, aggregation })),
+    customProperties: customProperties.map(({ label, expression }) => ({ label, expression })),
     measures: measures.map(({ label, expression }) => ({ label, expression })),
     datasetName: els.datasetNameInput.value.trim(),
     navigationLinks: els.navigationLinksInput.checked,
     requireAllCoordinates: els.requireAllCoordinatesInput.checked,
     skipNullEntities: els.skipNullEntitiesInput.checked,
+    coordinateSourceField: els.coordinateSourceFieldInput.value.trim(),
+    coordinateSourceValue: els.coordinateSourceValueInput.value.trim(),
     coordinateOverrides: els.coordinateOverridesInput.value.trim(),
     virtualProxyPath: normalizedVirtualProxy()
   };
@@ -836,22 +1002,31 @@ async function loadConfig() {
     ? stored.layerIndex : 0;
   els.layerSelect.value = String(layerIndex);
   applyLayer(layerIndex);
-  els.latitudeInput.value = stored.latitudeField ?? els.latitudeInput.value;
-  els.longitudeInput.value = stored.longitudeField ?? els.longitudeInput.value;
+  if (stored.latitudeField && [...els.latitudeInput.options].some((option) => option.value === stored.latitudeField)) {
+    els.latitudeInput.value = stored.latitudeField;
+  }
+  if (stored.longitudeField && [...els.longitudeInput.options].some((option) => option.value === stored.longitudeField)) {
+    els.longitudeInput.value = stored.longitudeField;
+  }
   renderEntityOptions(layerIndex, stored.entityKey ?? "");
 
   selectedProperties = new Map((stored.properties ?? [])
     .filter((item) => inspectionReport.fields.some((field) => field.name === item.field))
     .map((item) => [item.field, item.aggregation ?? "only"]));
+  customProperties = (stored.customProperties ?? []).map((item) => ({ id: crypto.randomUUID(), ...item }));
   measures = (stored.measures ?? []).map((item) => ({ id: crypto.randomUUID(), ...item }));
   els.datasetNameInput.value = stored.datasetName ?? "qlik_points";
   els.navigationLinksInput.checked = Boolean(stored.navigationLinks);
   els.requireAllCoordinatesInput.checked = stored.requireAllCoordinates !== false;
   els.skipNullEntitiesInput.checked = stored.skipNullEntities !== false;
+  els.coordinateSourceFieldInput.value = stored.coordinateSourceField ?? "coordinate_source";
+  els.coordinateSourceValueInput.value = stored.coordinateSourceValue ?? "Qlik";
   els.coordinateOverridesInput.value = stored.coordinateOverrides ?? "";
   if (typeof stored.virtualProxyPath === "string") els.virtualProxyInput.value = stored.virtualProxyPath;
   renderFieldList();
+  renderCustomProperties();
   renderMeasures();
+  updateEffectiveConfigPreview();
   showToast("Configuração carregada.");
 }
 
@@ -883,8 +1058,18 @@ els.detectButton.addEventListener("click", () => { void detectContext(); });
 els.probeButton.addEventListener("click", () => { void probe(); });
 els.inspectButton.addEventListener("click", () => { void inspect(); });
 els.layerSelect.addEventListener("change", () => applyLayer(selectedLayerIndex()));
+els.latitudeInput.addEventListener("change", updateEffectiveConfigPreview);
+els.longitudeInput.addEventListener("change", updateEffectiveConfigPreview);
+els.entityKeySelect.addEventListener("change", updateEffectiveConfigPreview);
 els.fieldSearchInput.addEventListener("input", renderFieldList);
+els.addCustomPropertyButton.addEventListener("click", () => addCustomProperty());
 els.addMeasureButton.addEventListener("click", () => addMeasure());
+for (const input of [
+  els.datasetNameInput, els.navigationLinksInput, els.requireAllCoordinatesInput, els.skipNullEntitiesInput,
+  els.coordinateSourceFieldInput, els.coordinateSourceValueInput, els.coordinateOverridesInput, els.virtualProxyInput
+]) {
+  input.addEventListener(input.type === "checkbox" ? "change" : "input", updateEffectiveConfigPreview);
+}
 els.extractButton.addEventListener("click", () => { void extract(); });
 els.downloadButton.addEventListener("click", () => { void downloadResult(); });
 els.saveConfigButton.addEventListener("click", () => { void saveConfig(); });
