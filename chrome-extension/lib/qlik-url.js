@@ -37,6 +37,21 @@ export function parseQlikSenseUrl(rawUrl) {
   };
 }
 
+export function hostPermissionPattern(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+
+  // Chrome match patterns do not need a port. A host permission granted for
+  // this hostname covers the matching scheme on that host.
+  return `${url.protocol}//${url.hostname}/*`;
+}
+
 export function configStorageKey({ origin, appId, sheetId }) {
   if (!origin || !appId || !sheetId) return null;
   return `qlik-geojson-extractor:v1:${origin}:${appId}:${sheetId}`;

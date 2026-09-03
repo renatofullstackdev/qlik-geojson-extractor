@@ -22,6 +22,14 @@
         <button id="detectButton" class="secondary" type="button">Detectar</button>
       </div>
       <p id="pageMessage" class="hint">Abra uma sheet do Qlik e clique no ícone da extensão.</p>
+      <div class="host-access-row">
+        <div>
+          <strong>Acesso ao host Qlik</strong>
+          <span id="hostAccessBadge" class="badge neutral">não verificado</span>
+        </div>
+        <button id="hostAccessButton" class="secondary" type="button">Permitir acesso a este site</button>
+      </div>
+      <p class="hint">O Chrome pedirá acesso somente ao host Qlik atual. A extensão não recebe acesso automático a todos os sites.</p>
       <label>App ID
         <input id="appIdInput" autocomplete="off" spellcheck="false">
       </label>
@@ -134,7 +142,7 @@
 
     <section class="card privacy">
       <h2>Privacidade</h2>
-      <p>A extensão usa apenas a guia ativa após ação explícita do usuário. Não solicita <code>&lt;all_urls&gt;</code>, não envia dados a servidores externos e armazena somente configurações, nunca o GeoJSON extraído.</p>
+      <p>A extensão solicita acesso somente ao host Qlik escolhido pelo usuário, em tempo de execução. O manifesto declara hosts HTTP/HTTPS apenas como permissões opcionais; nenhum host é concedido automaticamente na instalação. A extensão não envia dados a servidores externos e armazena somente configurações, nunca o GeoJSON extraído.</p>
     </section>
   </main>
 

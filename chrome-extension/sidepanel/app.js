@@ -1,17 +1,20 @@
-import { configStorageKey, parseQlikSenseUrl, safeFilename } from "../lib/qlik-url.js";
+import { configStorageKey, hostPermissionPattern, parseQlikSenseUrl, safeFilename } from "../lib/qlik-url.js";
 
 const els = Object.fromEntries([
-  "connectionBadge", "detectButton", "pageMessage", "appIdInput", "sheetIdInput", "virtualProxyInput",
-  "probeButton", "inspectButton", "probeOutput", "inspectionSection", "layerSelect", "latitudeInput",
-  "longitudeInput", "layerDiagnostic", "entityKeySelect", "propertiesSection", "selectedPropertyCount",
-  "fieldSearchInput", "fieldList", "measuresSection", "addMeasureButton", "measureList", "optionsSection",
-  "datasetNameInput", "navigationLinksInput", "requireAllCoordinatesInput", "skipNullEntitiesInput",
-  "coordinateOverridesInput", "saveConfigButton", "loadConfigButton", "clearConfigButton", "extractSection",
-  "extractButton", "extractStatus", "resultSummary", "missingDetails", "missingOutput", "skippedDetails",
-  "skippedOutput", "previewDetails", "previewOutput", "downloadButton", "toast"
+  "connectionBadge", "detectButton", "pageMessage", "hostAccessBadge", "hostAccessButton",
+  "appIdInput", "sheetIdInput", "virtualProxyInput", "probeButton", "inspectButton", "probeOutput",
+  "inspectionSection", "layerSelect", "latitudeInput", "longitudeInput", "layerDiagnostic", "entityKeySelect",
+  "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "measuresSection",
+  "addMeasureButton", "measureList", "optionsSection", "datasetNameInput", "navigationLinksInput",
+  "requireAllCoordinatesInput", "skipNullEntitiesInput", "coordinateOverridesInput", "saveConfigButton",
+  "loadConfigButton", "clearConfigButton", "extractSection", "extractButton", "extractStatus", "resultSummary",
+  "missingDetails", "missingOutput", "skippedDetails", "skippedOutput", "previewDetails", "previewOutput",
+  "downloadButton", "toast"
 ].map((id) => [id, document.getElementById(id)]));
 
 let pageContext = null;
+let currentHostPattern = null;
+let hostAccessGranted = false;
 let inspectionReport = null;
 let selectedProperties = new Map();
 let measures = [];
@@ -60,34 +63,139 @@ function pretty(value) {
   return JSON.stringify(value, null, 2);
 }
 
-async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("Não foi possível identificar a guia ativa.");
-  return tab;
+const SESSION_CONTEXT_KEY = "qlikGeojsonGrantedTabContext";
+
+async function getGrantedTabContext({ retry = true } = {}) {
+  const attempts = retry ? 12 : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const stored = (await chrome.storage.session.get(SESSION_CONTEXT_KEY))[SESSION_CONTEXT_KEY];
+    if (stored?.tabId) return stored;
+    if (attempt + 1 < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw new Error(
+    "Nenhuma guia foi associada à extensão. Abra a sheet Qlik e clique no ícone da extensão na barra do Chrome."
+  );
 }
 
-async function getActivePageUrl(tab) {
-  if (tab.url) return tab.url;
+async function getGrantedPageUrl(context) {
   const result = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
+    target: { tabId: context.tabId },
     func: () => location.href
   });
   return result?.[0]?.result ?? null;
 }
 
+function renderHostAccessState() {
+  if (!currentHostPattern) {
+    els.hostAccessBadge.className = "badge neutral";
+    els.hostAccessBadge.textContent = "host desconhecido";
+    els.hostAccessButton.textContent = "Permitir acesso a este site";
+    els.hostAccessButton.disabled = true;
+    return;
+  }
+
+  els.hostAccessButton.disabled = false;
+  if (hostAccessGranted) {
+    els.hostAccessBadge.className = "badge success";
+    els.hostAccessBadge.textContent = "permitido";
+    els.hostAccessButton.textContent = "Remover acesso deste site";
+  } else {
+    els.hostAccessBadge.className = "badge error";
+    els.hostAccessBadge.textContent = "não permitido";
+    els.hostAccessButton.textContent = "Permitir acesso a este site";
+  }
+}
+
+async function refreshHostAccessState() {
+  if (!currentHostPattern) {
+    hostAccessGranted = false;
+    renderHostAccessState();
+    return false;
+  }
+
+  hostAccessGranted = await chrome.permissions.contains({ origins: [currentHostPattern] });
+  renderHostAccessState();
+  return hostAccessGranted;
+}
+
+function requestOrRemoveCurrentHostAccess() {
+  // permissions.request() must originate from a user gesture. This function is
+  // called directly from the Side Panel button click and intentionally does no
+  // asynchronous work before requesting the permission.
+  if (!currentHostPattern) {
+    showToast("Abra uma sheet Qlik e detecte a página antes de conceder acesso.", "error");
+    return;
+  }
+
+  const operation = hostAccessGranted
+    ? chrome.permissions.remove({ origins: [currentHostPattern] })
+    : chrome.permissions.request({ origins: [currentHostPattern] });
+
+  void operation.then(async (changed) => {
+    await refreshHostAccessState();
+    if (hostAccessGranted) {
+      showToast("Acesso concedido somente ao host Qlik atual.");
+      await detectContext({ quiet: true });
+    } else if (changed) {
+      showToast("Acesso ao host removido.");
+      setConnectionBadge("neutral", "não testado");
+    } else {
+      showToast("O Chrome não concedeu acesso ao host Qlik.", "error");
+    }
+  }).catch((error) => {
+    showToast(`Não foi possível alterar a permissão do host: ${error.message}`, "error");
+  });
+}
+
 async function detectContext({ quiet = false } = {}) {
   try {
-    const tab = await getActiveTab();
-    const href = await getActivePageUrl(tab);
-    const parsed = parseQlikSenseUrl(href);
-    pageContext = { ...parsed, tabId: tab.id, url: href };
+    const granted = await getGrantedTabContext();
+    let href = granted.url;
+    let parsed = parseQlikSenseUrl(href);
+
+    currentHostPattern = hostPermissionPattern(href);
+    await refreshHostAccessState();
+
+    // After the user has granted the exact host, refresh the actual page URL so
+    // same-origin navigation to another app/sheet is detected without another
+    // permission prompt.
+    if (hostAccessGranted) {
+      try {
+        const currentHref = await getGrantedPageUrl(granted);
+        if (currentHref) {
+          href = currentHref;
+          parsed = parseQlikSenseUrl(href);
+          const newPattern = hostPermissionPattern(href);
+          if (newPattern !== currentHostPattern) {
+            currentHostPattern = newPattern;
+            await refreshHostAccessState();
+          }
+          await chrome.storage.session.set({
+            [SESSION_CONTEXT_KEY]: { ...granted, url: href, capturedAt: Date.now() }
+          });
+        }
+      } catch (error) {
+        // A permission may have been revoked between contains() and injection.
+        hostAccessGranted = false;
+        renderHostAccessState();
+        if (!quiet) throw error;
+      }
+    }
+
+    pageContext = { ...parsed, tabId: granted.tabId, windowId: granted.windowId, url: href };
 
     if (parsed.appId) els.appIdInput.value = parsed.appId;
     if (parsed.sheetId) els.sheetIdInput.value = parsed.sheetId;
     els.virtualProxyInput.value = parsed.virtualProxyPath ?? "";
 
     if (parsed.isQlikSheet) {
-      els.pageMessage.textContent = `Qlik detectado em ${parsed.origin}. App e sheet foram preenchidos pela URL.`;
+      const accessText = hostAccessGranted
+        ? "Acesso ao host concedido."
+        : "Clique em ‘Permitir acesso a este site’ antes de testar ou inspecionar.";
+      els.pageMessage.textContent = `Qlik detectado em ${parsed.origin}. App e sheet foram preenchidos pela URL. ${accessText}`;
       if (!quiet) showToast("App e sheet detectados pela URL atual.");
     } else {
       els.pageMessage.textContent = "A URL atual não corresponde ao padrão /sense/app/.../sheet/.... Preencha os IDs manualmente ou abra uma sheet Qlik.";
@@ -96,6 +204,9 @@ async function detectContext({ quiet = false } = {}) {
     return pageContext;
   } catch (error) {
     pageContext = null;
+    currentHostPattern = null;
+    hostAccessGranted = false;
+    renderHostAccessState();
     els.pageMessage.textContent = permissionHint(error);
     if (!quiet) showToast(permissionHint(error), "error");
     throw error;
@@ -104,10 +215,29 @@ async function detectContext({ quiet = false } = {}) {
 
 function permissionHint(error) {
   const message = error?.message ?? String(error);
-  if (/Cannot access|permission|activeTab|chrome:\/\//i.test(message)) {
-    return "A extensão não tem acesso à guia atual. Abra a sheet Qlik e clique novamente no ícone da extensão para conceder activeTab.";
+  if (/Nenhuma guia foi associada/i.test(message)) return message;
+  if (/HOST_PERMISSION_REQUIRED/i.test(message)) {
+    return "Conceda acesso ao host Qlik atual pelo botão ‘Permitir acesso a este site’.";
+  }
+  if (/Cannot access|manifest must request permission|permission|activeTab|chrome:\/\//i.test(message)) {
+    return "A extensão ainda não tem acesso ao host desta página. Clique em ‘Permitir acesso a este site’.";
+  }
+  if (/No tab with id|tab was closed/i.test(message)) {
+    return "A guia Qlik associada ao painel foi fechada. Abra a sheet e clique novamente no ícone da extensão.";
   }
   return message;
+}
+
+async function requireCurrentHostAccess(granted) {
+  const pattern = hostPermissionPattern(granted.url);
+  if (!pattern) throw new Error("A guia associada não usa HTTP/HTTPS.");
+  const allowed = await chrome.permissions.contains({ origins: [pattern] });
+  if (!allowed) {
+    const error = new Error("HOST_PERMISSION_REQUIRED");
+    error.code = "HOST_PERMISSION_REQUIRED";
+    throw error;
+  }
+  return pattern;
 }
 
 async function ensurePageCore(tabId) {
@@ -162,11 +292,30 @@ async function executeQlikCommand(command, payload) {
 }
 
 async function runQlik(command, options) {
-  const tab = await getActiveTab();
-  await ensurePageCore(tab.id);
+  const granted = await getGrantedTabContext();
+  await requireCurrentHostAccess(granted);
+
+  let currentUrl;
+  try {
+    currentUrl = await getGrantedPageUrl(granted);
+  } catch (error) {
+    throw new Error(
+      "A guia não pode ser acessada com a permissão de host atual. Se ela navegou para outro site, clique novamente no ícone da extensão nessa página e conceda o novo host."
+    );
+  }
+
+  const originalOrigin = new URL(granted.url).origin;
+  const currentOrigin = new URL(currentUrl).origin;
+  if (currentOrigin !== originalOrigin) {
+    throw new Error(
+      "A guia navegou para outra origem. Clique novamente no ícone da extensão nesta página e conceda acesso ao novo host."
+    );
+  }
+
+  await ensurePageCore(granted.tabId);
 
   const injection = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
+    target: { tabId: granted.tabId },
     world: "MAIN",
     func: executeQlikCommand,
     args: [command, {
@@ -625,9 +774,8 @@ async function downloadResult() {
 }
 
 async function currentStorageIdentity() {
-  const tab = await getActiveTab();
-  const href = await getActivePageUrl(tab);
-  const parsed = parseQlikSenseUrl(href);
+  const granted = await getGrantedTabContext();
+  const parsed = parseQlikSenseUrl(pageContext?.url ?? granted.url);
   const appId = els.appIdInput.value.trim();
   const sheetId = els.sheetIdInput.value.trim();
   return {
@@ -730,6 +878,7 @@ async function refreshSavedConfigAvailability() {
   }
 }
 
+els.hostAccessButton.addEventListener("click", requestOrRemoveCurrentHostAccess);
 els.detectButton.addEventListener("click", () => { void detectContext(); });
 els.probeButton.addEventListener("click", () => { void probe(); });
 els.inspectButton.addEventListener("click", () => { void inspect(); });
