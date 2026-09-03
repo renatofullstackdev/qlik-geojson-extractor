@@ -1,0 +1,16 @@
+{
+  "name": "qlik-geojson-extractor",
+  "version": "1.0.0",
+  "description": "Browser-first Qlik Sense/QIX inspector and PointLayer-to-GeoJSON extractor.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/*.js && node --check browser/qlik-geojson-extractor.js && node --check examples/*.js",
+    "build": "node scripts/build-browser.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
