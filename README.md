@@ -4,6 +4,55 @@ Toolkit **browser-first** para inspecionar apps do Qlik Sense e extrair camadas 
 
 O fluxo recomendado é usar o **DevTools do navegador na própria página Qlik**, onde você já possui autorização. Para extrair dados não é necessário instalar dependências npm.
 
+> **Política dos exemplos deste projeto:** o único painel concreto usado nos exemplos é o painel público **Locais de Votação do TRE-DF**. Outros casos devem ser tratados com placeholders genéricos, sem registrar identificadores ou dados de painéis internos.
+
+## Interface recomendada: extensão do Chrome
+
+O projeto também inclui uma extensão **Chrome Manifest V3** em `chrome-extension/`. Ela usa o mesmo núcleo de extração, mas substitui o fluxo manual do DevTools por um **Side Panel**.
+
+### Instalação local
+
+Na raiz do projeto:
+
+```bash
+npm run build
+```
+
+No Chrome/Chromium:
+
+1. abra `chrome://extensions`;
+2. habilite **Modo do desenvolvedor**;
+3. clique em **Carregar sem compactação**;
+4. selecione a pasta `chrome-extension/`;
+5. abra uma sheet Qlik em que você já esteja autenticado;
+6. clique no ícone **Qlik GeoJSON Extractor**.
+
+O painel lateral tenta detectar `appId`, `sheetId` e virtual proxy diretamente da URL. Depois siga:
+
+```text
+Testar conexão
+  ↓
+Inspecionar
+  ↓
+escolher PointLayer
+  ↓
+confirmar latitude/longitude
+  ↓
+escolher explicitamente a chave da entidade
+  ↓
+selecionar propriedades e medidas
+  ↓
+Gerar GeoJSON
+  ↓
+validar resumo e preview
+  ↓
+Baixar GeoJSON
+```
+
+A extensão usa `activeTab` em vez de acesso permanente a todos os sites. Ela não declara `<all_urls>` nem `host_permissions`, não envia dados a serviços externos e persiste somente configurações de extração. Consulte `docs/CHROME_EXTENSION.md`.
+
+O fluxo pelo DevTools continua disponível abaixo para diagnóstico avançado e desenvolvimento.
+
 ## O que a ferramenta faz
 
 - obtém o token CSRF do Qlik;
