@@ -2,8 +2,6 @@
 
 Browser-first toolkit to inspect Qlik Sense apps and extract latitude/longitude Point data to GeoJSON through the Qlik Engine (QIX) API.
 
-The project was generalized from a real TRE-DF map extraction, but the core has no TRE-DF-specific assumptions.
-
 ## What it does
 
 - fetches the Qlik CSRF token;
