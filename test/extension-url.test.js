@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { configStorageKey, parseQlikSenseUrl, safeFilename } from "../chrome-extension/lib/qlik-url.js";
+import { configStorageKey, hostPermissionPattern, parseQlikSenseUrl, safeFilename } from "../chrome-extension/lib/qlik-url.js";
 
 test("parseQlikSenseUrl extracts app, sheet and no virtual proxy", () => {
   const result = parseQlikSenseUrl(
@@ -46,4 +46,15 @@ test("configStorageKey scopes configuration by origin, app and sheet", () => {
 test("safeFilename removes path-unsafe characters without losing the useful name", () => {
   assert.equal(safeFilename("Locais de votação / TRE-DF"), "Locais_de_votacao_TRE-DF");
   assert.equal(safeFilename("  "), "qlik_points");
+});
+
+
+test("hostPermissionPattern narrows runtime access to one HTTP/HTTPS hostname", () => {
+  assert.equal(
+    hostPermissionPattern("https://example.test:8443/sense/app/A/sheet/S"),
+    "https://example.test/*"
+  );
+  assert.equal(hostPermissionPattern("http://127.0.0.1:4848/sense/app/A/sheet/S"), "http://127.0.0.1/*");
+  assert.equal(hostPermissionPattern("chrome://extensions"), null);
+  assert.equal(hostPermissionPattern("not a url"), null);
 });
