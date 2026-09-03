@@ -19,15 +19,68 @@ function qlikFieldRef(fieldName) {
   return `[${String(fieldName).replace(/]/g, "]]" )}]`;
 }
 
+/**
+ * Resolves Qlik references that are only a direct field reference.
+ *
+ * Examples:
+ *   LATITUDE                -> LATITUDE
+ *   =LATITUDE               -> LATITUDE
+ *   [ENTITY NAME]           -> ENTITY NAME
+ *   =[ENTITY NAME]          -> ENTITY NAME
+ *
+ * Complex expressions are deliberately not guessed:
+ *   =Only([LATITUDE])       -> null
+ */
+function resolveSimpleQlikFieldReference(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  const hadEquals = raw.startsWith("=");
+  const expression = hadEquals ? raw.slice(1).trim() : raw;
+  if (!expression) return null;
+
+  if (expression.startsWith("[") && expression.endsWith("]")) {
+    const inner = expression.slice(1, -1);
+    let fieldName = "";
+
+    for (let i = 0; i < inner.length; i += 1) {
+      if (inner[i] !== "]") {
+        fieldName += inner[i];
+        continue;
+      }
+
+      if (inner[i + 1] === "]") {
+        fieldName += "]";
+        i += 1;
+        continue;
+      }
+
+      return null;
+    }
+
+    return fieldName || null;
+  }
+
+  if (!hadEquals) return expression;
+
+  // A leading '=' makes the value a Qlik expression. Only accept the
+  // expression when it is clearly a bare field identifier.
+  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression)) {
+    return expression;
+  }
+
+  return null;
+}
+
 function qTextOrNum(value) {
-  if (!value) return null;
+  if (!value || value.qIsNull === true) return null;
   if (typeof value.qText === "string" && value.qText !== "") return value.qText;
   if (typeof value.qNum === "number" && Number.isFinite(value.qNum)) return value.qNum;
   return null;
 }
 
 function qNumOrText(value) {
-  if (!value) return null;
+  if (!value || value.qIsNull === true) return null;
   if (typeof value.qNum === "number" && Number.isFinite(value.qNum)) return value.qNum;
   if (typeof value.qText === "string" && value.qText !== "") return value.qText;
   return null;
@@ -268,18 +321,32 @@ async function inspectSheet(client, sheetId) {
   return { sheetId, tree, objects, pointLayers };
 }
 
+function resolvedFieldReference(value) {
+  return resolveSimpleQlikFieldReference(value) ?? value ?? null;
+}
+
 function summarizePointLayers(pointLayers) {
-  return pointLayers.map((item) => ({
-    objectId: item.objectId,
-    layerId: item.layerId,
-    layerIndex: item.layerIndex,
-    isLatLong: !!item.layer?.isLatLong,
-    locationOrLatitude: item.layer?.locationOrLatitude?.key ?? null,
-    longitude: item.layer?.longitude?.key ?? null,
-    visualDimensions: item.layer?.qHyperCubeDef?.qDimensions?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [],
-    measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,
-    maxObjects: item.layer?.maxObjects ?? null
-  }));
+  return pointLayers.map((item) => {
+    const latitudeRaw = item.layer?.locationOrLatitude?.key ?? null;
+    const longitudeRaw = item.layer?.longitude?.key ?? null;
+    const visualDimensionsRaw = item.layer?.qHyperCubeDef?.qDimensions
+      ?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [];
+
+    return {
+      objectId: item.objectId,
+      layerId: item.layerId,
+      layerIndex: item.layerIndex,
+      isLatLong: !!item.layer?.isLatLong,
+      locationOrLatitude: resolvedFieldReference(latitudeRaw),
+      longitude: resolvedFieldReference(longitudeRaw),
+      visualDimensions: visualDimensionsRaw.map(resolvedFieldReference),
+      locationOrLatitudeRaw: latitudeRaw,
+      longitudeRaw,
+      visualDimensionsRaw,
+      measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,
+      maxObjects: item.layer?.maxObjects ?? null
+    };
+  });
 }
 
 // ---- src/hypercube.js ----
@@ -377,12 +444,22 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
   const featureCollection = { type: "FeatureCollection", name: config.name ?? "qlik_points", features: [] };
   const missing = [];
   const appliedOverrides = [];
+  const skippedNullEntities = [];
   const keys = new Set();
 
   rows.forEach((row, rowIndex) => {
     const dimensionCell = row[0];
     const entityKeyValue = qTextOrNum(dimensionCell);
-    if (entityKeyValue === null || entityKeyValue === "") throw new Error(`Row ${rowIndex}: empty entity key.`);
+    if (entityKeyValue === null || entityKeyValue === "") {
+      if (config.skipNullEntities === false) {
+        throw new Error(`Row ${rowIndex}: null entity key.`);
+      }
+      skippedNullEntities.push({
+        rowIndex,
+        displayText: typeof dimensionCell?.qText === "string" ? dimensionCell.qText : null
+      });
+      return;
+    }
     const keyString = String(entityKeyValue);
     if (keys.has(keyString)) throw new Error(`Duplicate entity key: ${keyString}`);
     keys.add(keyString);
@@ -439,7 +516,14 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
     });
   });
 
-  return { featureCollection, missing, appliedOverrides, uniqueKeys: keys.size };
+  return {
+    featureCollection,
+    missing,
+    appliedOverrides,
+    skippedNullEntities,
+    skippedNullEntityCount: skippedNullEntities.length,
+    uniqueKeys: keys.size
+  };
 }
 
 function validatePointGeoJSON(featureCollection) {
@@ -599,7 +683,8 @@ class QlikGeoJSONExtractor {
         ...converted,
         validation,
         rowCount: rows.length,
-        featureCount: converted.featureCollection.features.length
+        featureCount: converted.featureCollection.features.length,
+        skippedNullEntityCount: converted.skippedNullEntities.length
       };
     } finally {
       this.client.close();
