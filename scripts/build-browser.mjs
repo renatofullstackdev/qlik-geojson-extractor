@@ -8,10 +8,13 @@ const src = path.join(root, "src");
 const output = path.join(root, "browser", "qlik-geojson-extractor.js");
 
 const modules = [
+  "codes.js",
+  "errors.js",
   "utils.js",
   "qix-client.js",
   "app-inspector.js",
   "map-inspector.js",
+  "spatial-analysis.js",
   "hypercube.js",
   "geojson.js",
   "download.js",
@@ -19,11 +22,13 @@ const modules = [
 ];
 
 const apiNames = [
-  "QixClient", "QlikGeoJSONExtractor", "listAppFields", "summarizeFields", "suggestEntityKeys",
-  "inspectSheet", "summarizePointLayers", "walkPropertyTree", "buildPointCubeDefinition",
-  "createSessionCube", "fetchAllStraightCubeRows", "rowsToPointGeoJSON", "validatePointGeoJSON",
-  "downloadJSON", "downloadGeoJSON", "normalizeName", "qlikFieldRef", "qTextOrNum", "qNumOrText",
-  "numberOrNull", "validCoordinates", "googleMapsUrl", "wazeUrl", "uniquePropertyName", "joinBasePath", "deepClone"
+  "ERROR_CODES", "DIAGNOSTIC_CODES", "EVIDENCE_CODES", "QlikGeoJSONError", "coreError", "serializeError",
+  "QixClient", "QlikGeoJSONExtractor", "coordinateWarnings", "listAppFields", "summarizeFields", "suggestEntityKeys", "candidatePool", "scoreEntityCandidate",
+  "inspectSheet", "summarizePointLayers", "walkPropertyTree", "coordinateDefinition", "analyzeCoordinateFields", "analyzeEntityCandidate",
+  "buildPointCubeDefinition", "createSessionCube", "fetchAllStraightCubeRows", "propertyExpression", "normalizeMeasures",
+  "rowsToPointGeoJSON", "validatePointGeoJSON", "downloadJSON", "downloadGeoJSON", "normalizeName", "qlikFieldRef",
+  "qTextOrNum", "qNumOrText", "numberOrNull", "validCoordinates", "googleMapsUrl", "wazeUrl", "uniquePropertyName",
+  "joinBasePath", "deepClone", "resolveSimpleQlikFieldReference"
 ];
 
 function stripModuleSyntax(source) {

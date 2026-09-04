@@ -5,6 +5,84 @@
 (function (global) {
   "use strict";
 
+// ---- src/codes.js ----
+const ERROR_CODES = Object.freeze({
+  QLIK_HOST_REQUIRED: "QLIK_HOST_REQUIRED",
+  CSRF_FETCH_FAILED: "CSRF_FETCH_FAILED",
+  CSRF_TOKEN_MISSING: "CSRF_TOKEN_MISSING",
+  CLIENT_ALREADY_CONNECTED: "CLIENT_ALREADY_CONNECTED",
+  WEBSOCKET_OPEN_FAILED: "WEBSOCKET_OPEN_FAILED",
+  WEBSOCKET_NOT_OPEN: "WEBSOCKET_NOT_OPEN",
+  OPENDOC_INVALID_HANDLE: "OPENDOC_INVALID_HANDLE",
+  CONNECTION_CLOSED: "CONNECTION_CLOSED",
+  FIELD_LIST_CREATE_FAILED: "FIELD_LIST_CREATE_FAILED",
+  SHEET_GET_FAILED: "SHEET_GET_FAILED",
+  PROPERTY_TREE_MISSING: "PROPERTY_TREE_MISSING",
+  UNSUPPORTED_PROPERTY_AGGREGATION: "UNSUPPORTED_PROPERTY_AGGREGATION",
+  SESSION_OBJECT_INVALID_HANDLE: "SESSION_OBJECT_INVALID_HANDLE",
+  HYPERCUBE_LAYOUT_MISSING: "HYPERCUBE_LAYOUT_MISSING",
+  LAT_LON_ATTRIBUTES_MISSING: "LAT_LON_ATTRIBUTES_MISSING",
+  NULL_ENTITY_KEY: "NULL_ENTITY_KEY",
+  DUPLICATE_ENTITY_KEY: "DUPLICATE_ENTITY_KEY",
+  OVERRIDE_GUARD_FIELD_MISSING: "OVERRIDE_GUARD_FIELD_MISSING",
+  OVERRIDE_GUARD_MISMATCH: "OVERRIDE_GUARD_MISMATCH",
+  EXTRACTION_CONFIG_MISSING: "EXTRACTION_CONFIG_MISSING",
+  MISSING_COORDINATES: "MISSING_COORDINATES",
+  GEOJSON_VALIDATION_FAILED: "GEOJSON_VALIDATION_FAILED",
+  GEOJSON_ROOT_INVALID: "GEOJSON_ROOT_INVALID",
+  GEOJSON_GEOMETRY_INVALID: "GEOJSON_GEOMETRY_INVALID",
+  GEOJSON_COORDINATES_INVALID: "GEOJSON_COORDINATES_INVALID",
+  QIX_RPC_ERROR: "QIX_RPC_ERROR"
+});
+
+const DIAGNOSTIC_CODES = Object.freeze({
+  VISUAL_DIMENSION_LOWER_CARDINALITY: "VISUAL_DIMENSION_LOWER_CARDINALITY",
+  COORDINATE_COMPLEX_EXPRESSION: "COORDINATE_COMPLEX_EXPRESSION",
+  COORDINATE_RANGE_INVALID: "COORDINATE_RANGE_INVALID",
+  COORDINATE_SWAP_LIKELY: "COORDINATE_SWAP_LIKELY",
+  COORDINATE_STATS_UNAVAILABLE: "COORDINATE_STATS_UNAVAILABLE"
+});
+
+const EVIDENCE_CODES = Object.freeze({
+  SPATIAL_ONE_PAIR_RATIO: "SPATIAL_ONE_PAIR_RATIO",
+  SPATIAL_MULTIPLE_PAIRS: "SPATIAL_MULTIPLE_PAIRS",
+  SPATIAL_MISSING_COORDINATES: "SPATIAL_MISSING_COORDINATES",
+  SAME_SOURCE_TABLE: "SAME_SOURCE_TABLE",
+  CARDINALITY_CLOSE: "CARDINALITY_CLOSE",
+  VISUAL_DIMENSION: "VISUAL_DIMENSION",
+  TAG_KEY: "TAG_KEY",
+  NAME_KEY_LIKE: "NAME_KEY_LIKE",
+  NAME_SPATIAL_ENTITY_LIKE: "NAME_SPATIAL_ENTITY_LIKE"
+});
+
+// ---- src/errors.js ----
+class QlikGeoJSONError extends Error {
+  constructor(code, message, params = {}, details = {}) {
+    super(message || code);
+    this.name = "QlikGeoJSONError";
+    this.code = code;
+    this.params = params;
+    Object.assign(this, details);
+  }
+}
+
+function coreError(code, message, params = {}, details = {}) {
+  return new QlikGeoJSONError(code, message, params, details);
+}
+
+function serializeError(error) {
+  return {
+    code: error?.code ?? null,
+    params: error?.params ?? null,
+    message: error?.message ?? String(error),
+    qlik: error?.qlik ?? null,
+    missing: error?.missing ?? null,
+    validation: error?.validation ?? null
+  };
+}
+
+{ ERROR_CODES };
+
 // ---- src/utils.js ----
 function normalizeName(value) {
   return String(value ?? "")
@@ -131,7 +209,7 @@ function deepClone(value) {
 // ---- src/qix-client.js ----
 class QixClient {
   constructor({ host = globalThis.location?.host, protocol, virtualProxyPath = "", csrfPath, identityPrefix = "qlik-geojson" } = {}) {
-    if (!host) throw new Error("Qlik host is required outside a browser page.");
+    if (!host) throw coreError(ERROR_CODES.QLIK_HOST_REQUIRED, "Qlik host is required outside a browser page.");
     this.host = host;
     this.protocol = protocol ?? (globalThis.location?.protocol === "https:" ? "wss:" : "ws:");
     this.httpProtocol = this.protocol === "wss:" ? "https:" : "http:";
@@ -151,15 +229,21 @@ class QixClient {
       : `${this.httpProtocol}//${this.host}${this.csrfPath}`;
     const response = await fetch(url, { credentials: "include", cache: "no-store" });
     if (!response.ok && response.status !== 204) {
-      throw new Error(`Failed to obtain Qlik CSRF token: ${response.status} ${response.statusText}`);
+      throw coreError(
+        ERROR_CODES.CSRF_FETCH_FAILED,
+        `Failed to obtain Qlik CSRF token: ${response.status} ${response.statusText}`,
+        { status: response.status, statusText: response.statusText, url }
+      );
     }
     const token = response.headers.get("qlik-csrf-token");
-    if (!token) throw new Error("Qlik response did not contain qlik-csrf-token.");
+    if (!token) {
+      throw coreError(ERROR_CODES.CSRF_TOKEN_MISSING, "Qlik response did not contain qlik-csrf-token.", { url });
+    }
     return token;
   }
 
   async connect(appId, { identity = `${this.identityPrefix}-${crypto.randomUUID()}` } = {}) {
-    if (this.ws) throw new Error("QixClient is already connected.");
+    if (this.ws) throw coreError(ERROR_CODES.CLIENT_ALREADY_CONNECTED, "QixClient is already connected.");
     const csrfToken = await this.fetchCsrfToken();
     const appPath = joinBasePath(this.virtualProxyPath, `/app/${encodeURIComponent(appId)}/identity/${encodeURIComponent(identity)}`);
     const wsUrl = `${this.protocol}//${this.host}${appPath}?qlik-csrf-token=${encodeURIComponent(csrfToken)}`;
@@ -175,8 +259,12 @@ class QixClient {
       if (!request) return;
       this.pending.delete(message.id);
       if (message.error) {
-        const error = new Error(`${message.error.code}: ${message.error.message}`);
-        error.qlik = message.error;
+        const error = coreError(
+          ERROR_CODES.QIX_RPC_ERROR,
+          `${message.error.code}: ${message.error.message}`,
+          { qixCode: message.error.code, qixMessage: message.error.message },
+          { qlik: message.error }
+        );
         request.reject(error);
       } else {
         request.resolve(message.result);
@@ -185,7 +273,7 @@ class QixClient {
 
     await new Promise((resolve, reject) => {
       ws.onopen = resolve;
-      ws.onerror = () => reject(new Error("Could not open Qlik Engine WebSocket."));
+      ws.onerror = () => reject(coreError(ERROR_CODES.WEBSOCKET_OPEN_FAILED, "Could not open Qlik Engine WebSocket.", { wsUrl }));
     });
 
     this.appId = appId;
@@ -193,7 +281,9 @@ class QixClient {
   }
 
   rpc(handle, method, params = []) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Qlik WebSocket is not open.");
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw coreError(ERROR_CODES.WEBSOCKET_NOT_OPEN, "Qlik WebSocket is not open.", { method, handle });
+    }
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
@@ -204,7 +294,9 @@ class QixClient {
   async openDoc(appId = this.appId) {
     const result = await this.rpc(-1, "OpenDoc", [appId]);
     const handle = result?.qReturn?.qHandle;
-    if (typeof handle !== "number") throw new Error("OpenDoc did not return a valid document handle.");
+    if (typeof handle !== "number") {
+      throw coreError(ERROR_CODES.OPENDOC_INVALID_HANDLE, "OpenDoc did not return a valid document handle.", { appId });
+    }
     this.docHandle = handle;
     return handle;
   }
@@ -219,7 +311,9 @@ class QixClient {
     try { this.ws?.close(); } finally {
       this.ws = null;
       this.docHandle = null;
-      for (const { reject } of this.pending.values()) reject(new Error("Qlik connection closed."));
+      for (const { reject } of this.pending.values()) {
+        reject(coreError(ERROR_CODES.CONNECTION_CLOSED, "Qlik connection closed."));
+      }
       this.pending.clear();
     }
   }
@@ -240,7 +334,9 @@ async function listAppFields(client, { showHidden = true, showSemantic = true, s
     }
   }]);
   const handle = result?.qReturn?.qHandle;
-  if (typeof handle !== "number") throw new Error("Could not create Qlik field-list session object.");
+  if (typeof handle !== "number") {
+    throw coreError(ERROR_CODES.FIELD_LIST_CREATE_FAILED, "Could not create Qlik field-list session object.");
+  }
   const layout = await client.rpc(handle, "GetLayout", []);
   return layout?.qLayout?.qFieldList?.qItems ?? [];
 }
@@ -257,29 +353,134 @@ function summarizeFields(fields) {
   }));
 }
 
-function suggestEntityKeys(fields, { latitudeField, longitudeField, limit = 12 } = {}) {
+function hasSharedSource(field, coordinateFields) {
+  const sources = new Set(field.qSrcTables ?? []);
+  return coordinateFields.some((coordinate) => (coordinate?.qSrcTables ?? []).some((table) => sources.has(table)));
+}
+
+function confidenceFromProfile(profile) {
+  if (!profile?.available || !profile.entityCount) return "unknown";
+  if (profile.onePairRatio >= 0.98 && profile.multiplePairRatio === 0 && profile.missingRatio <= 0.02) return "high";
+  if (profile.onePairRatio >= 0.9 && profile.multiplePairRatio <= 0.05 && profile.missingRatio <= 0.1) return "medium";
+  return "low";
+}
+
+function scoreEntityCandidate(field, {
+  coordinateCardinality = null,
+  visualDimensions = [],
+  coordinateFields = [],
+  spatialProfile = null
+} = {}) {
+  const name = normalizeName(field.qName);
+  let score = 0;
+  const evidence = [];
+  const add = (code, weight, params = {}) => {
+    score += weight;
+    evidence.push({ code, weight, params });
+  };
+
+  if ((field.qTags ?? []).includes("$key")) add(EVIDENCE_CODES.TAG_KEY, 5);
+  if (/^(ID|COD|KEY|CHAVE)_/.test(name) || /_(ID|COD|KEY|CHAVE)$/.test(name)) {
+    add(EVIDENCE_CODES.NAME_KEY_LIKE, 5);
+  }
+  if (/(OBJETO|ENTIDADE|ENTITY|LOCAL|LOCATION|CIRCUNSCRICAO)/.test(name)) {
+    add(EVIDENCE_CODES.NAME_SPATIAL_ENTITY_LIKE, 5);
+  }
+  if (visualDimensions.includes(field.qName)) add(EVIDENCE_CODES.VISUAL_DIMENSION, 10);
+  if (hasSharedSource(field, coordinateFields)) add(EVIDENCE_CODES.SAME_SOURCE_TABLE, 20);
+
+  if (coordinateCardinality && Number.isFinite(field.qCardinal)) {
+    const ratio = Math.abs(field.qCardinal - coordinateCardinality) / Math.max(1, coordinateCardinality);
+    const weight = ratio <= 0.02 ? 15 : ratio <= 0.1 ? 10 : ratio <= 0.25 ? 5 : 0;
+    if (weight) add(EVIDENCE_CODES.CARDINALITY_CLOSE, weight, { coordinateCardinality, fieldCardinality: field.qCardinal });
+  }
+
+  if (spatialProfile?.available && spatialProfile.entityCount) {
+    const onePairWeight = Math.round(40 * spatialProfile.onePairRatio);
+    if (onePairWeight) add(EVIDENCE_CODES.SPATIAL_ONE_PAIR_RATIO, onePairWeight, {
+      onePair: spatialProfile.onePair,
+      entityCount: spatialProfile.entityCount,
+      ratio: spatialProfile.onePairRatio
+    });
+    if (spatialProfile.multiplePairs) {
+      add(EVIDENCE_CODES.SPATIAL_MULTIPLE_PAIRS, -Math.max(10, Math.round(50 * spatialProfile.multiplePairRatio)), {
+        multiplePairs: spatialProfile.multiplePairs,
+        entityCount: spatialProfile.entityCount,
+        ratio: spatialProfile.multiplePairRatio
+      });
+    }
+    if (spatialProfile.withoutCoordinates) {
+      add(EVIDENCE_CODES.SPATIAL_MISSING_COORDINATES, -Math.max(5, Math.round(30 * spatialProfile.missingRatio)), {
+        withoutCoordinates: spatialProfile.withoutCoordinates,
+        entityCount: spatialProfile.entityCount,
+        ratio: spatialProfile.missingRatio
+      });
+    }
+  }
+
+  return {
+    field: field.qName,
+    cardinality: field.qCardinal,
+    score,
+    confidence: confidenceFromProfile(spatialProfile),
+    evidence,
+    spatialProfile
+  };
+}
+
+function candidatePool(fields, {
+  coordinateCardinality = null,
+  latitudeField,
+  longitudeField,
+  visualDimensions = [],
+  limit = 8
+} = {}) {
+  const coordinateFields = [
+    fields.find((f) => f.qName === latitudeField),
+    fields.find((f) => f.qName === longitudeField)
+  ].filter(Boolean);
+  const maxCardinality = coordinateCardinality
+    ? Math.max(coordinateCardinality + 100, coordinateCardinality * 4)
+    : 5000;
+
+  const preliminary = fields
+    .filter((field) => Number.isFinite(field.qCardinal) && field.qCardinal > 0)
+    .filter((field) => visualDimensions.includes(field.qName) || field.qCardinal <= maxCardinality)
+    .map((field) => scoreEntityCandidate(field, { coordinateCardinality, visualDimensions, coordinateFields }))
+    .sort((a, b) => b.score - a.score || Math.abs((a.cardinality ?? 0) - (coordinateCardinality ?? 0)) - Math.abs((b.cardinality ?? 0) - (coordinateCardinality ?? 0)));
+
+  const output = preliminary.slice(0, limit).map((item) => item.field);
+  for (const dim of visualDimensions) {
+    if (!output.includes(dim) && fields.some((field) => field.qName === dim)) output.push(dim);
+  }
+  return [...new Set(output)];
+}
+
+function suggestEntityKeys(fields, {
+  latitudeField,
+  longitudeField,
+  coordinateCardinality = null,
+  visualDimensions = [],
+  spatialProfiles = {},
+  limit = 12
+} = {}) {
   const lat = fields.find((f) => f.qName === latitudeField);
   const lon = fields.find((f) => f.qName === longitudeField);
-  const target = Math.max(lat?.qCardinal ?? 0, lon?.qCardinal ?? 0);
+  const target = coordinateCardinality ?? (Math.max(lat?.qCardinal ?? 0, lon?.qCardinal ?? 0) || null);
+  const coordinateFields = [lat, lon].filter(Boolean);
 
   return fields
-    .map((field) => {
-      const name = normalizeName(field.qName);
-      let score = 0;
-      const reasons = [];
-      if ((field.qTags ?? []).includes("$key")) { score += 50; reasons.push("tag:$key"); }
-      if (/^(ID|COD|KEY|CHAVE)_/.test(name) || /_(ID|COD|KEY|CHAVE)$/.test(name)) { score += 25; reasons.push("name:key-like"); }
-      if (/OBJETO/.test(name)) { score += 10; reasons.push("name:objeto"); }
-      if (target && Number.isFinite(field.qCardinal)) {
-        const distance = Math.abs(field.qCardinal - target);
-        const closeness = Math.max(0, 30 - distance);
-        score += closeness;
-        if (distance <= 2) reasons.push(`cardinality≈coordinates(${target})`);
-      }
-      return { field: field.qName, cardinality: field.qCardinal, score, reasons };
+    .map((field) => scoreEntityCandidate(field, {
+      coordinateCardinality: target,
+      visualDimensions,
+      coordinateFields,
+      spatialProfile: spatialProfiles[field.qName] ?? null
+    }))
+    .filter((item) => item.score > 0 || visualDimensions.includes(item.field))
+    .sort((a, b) => {
+      const confidenceRank = { high: 3, medium: 2, low: 1, unknown: 0 };
+      return (confidenceRank[b.confidence] - confidenceRank[a.confidence]) || b.score - a.score || String(a.field).localeCompare(String(b.field));
     })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || String(a.field).localeCompare(String(b.field)))
     .slice(0, limit);
 }
 
@@ -297,10 +498,14 @@ function walkPropertyTree(entry, path = "sheet", output = []) {
 async function inspectSheet(client, sheetId) {
   const sheetResult = await client.rpc(client.docHandle, "GetObject", [sheetId]);
   const sheetHandle = sheetResult?.qReturn?.qHandle;
-  if (typeof sheetHandle !== "number") throw new Error(`Could not get sheet ${sheetId}.`);
+  if (typeof sheetHandle !== "number") {
+    throw coreError(ERROR_CODES.SHEET_GET_FAILED, `Could not get sheet ${sheetId}.`, { sheetId });
+  }
   const treeResult = await client.rpc(sheetHandle, "GetFullPropertyTree", []);
   const tree = treeResult?.qPropEntry;
-  if (!tree) throw new Error(`GetFullPropertyTree returned no qPropEntry for ${sheetId}.`);
+  if (!tree) {
+    throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, `GetFullPropertyTree returned no qPropEntry for ${sheetId}.`, { sheetId });
+  }
   const objects = walkPropertyTree(tree);
   const pointLayers = [];
   for (const object of objects) {
@@ -321,7 +526,21 @@ async function inspectSheet(client, sheetId) {
   return { sheetId, tree, objects, pointLayers };
 }
 
-function resolvedFieldReference(value) {
+function coordinateDefinition(rawValue) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return { kind: "unknown", raw: null, field: null, expression: null };
+  const field = resolveSimpleQlikFieldReference(raw);
+  if (field) {
+    return { kind: "field", raw, field, expression: qlikFieldRef(field) };
+  }
+  if (raw.startsWith("=")) {
+    const expression = raw.slice(1).trim();
+    return { kind: "expression", raw, field: null, expression: expression || null };
+  }
+  return { kind: "field", raw, field: raw, expression: qlikFieldRef(raw) };
+}
+
+function resolvedDimension(value) {
   return resolveSimpleQlikFieldReference(value) ?? value ?? null;
 }
 
@@ -329,6 +548,8 @@ function summarizePointLayers(pointLayers) {
   return pointLayers.map((item) => {
     const latitudeRaw = item.layer?.locationOrLatitude?.key ?? null;
     const longitudeRaw = item.layer?.longitude?.key ?? null;
+    const latitudeDefinition = coordinateDefinition(latitudeRaw);
+    const longitudeDefinition = coordinateDefinition(longitudeRaw);
     const visualDimensionsRaw = item.layer?.qHyperCubeDef?.qDimensions
       ?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [];
 
@@ -337,9 +558,11 @@ function summarizePointLayers(pointLayers) {
       layerId: item.layerId,
       layerIndex: item.layerIndex,
       isLatLong: !!item.layer?.isLatLong,
-      locationOrLatitude: resolvedFieldReference(latitudeRaw),
-      longitude: resolvedFieldReference(longitudeRaw),
-      visualDimensions: visualDimensionsRaw.map(resolvedFieldReference),
+      locationOrLatitude: latitudeDefinition.field ?? latitudeRaw,
+      longitude: longitudeDefinition.field ?? longitudeRaw,
+      latitudeDefinition,
+      longitudeDefinition,
+      visualDimensions: visualDimensionsRaw.map(resolvedDimension),
       locationOrLatitudeRaw: latitudeRaw,
       longitudeRaw,
       visualDimensionsRaw,
@@ -347,6 +570,116 @@ function summarizePointLayers(pointLayers) {
       maxObjects: item.layer?.maxObjects ?? null
     };
   });
+}
+
+// ---- src/spatial-analysis.js ----
+function numericCell(cell) {
+  return numberOrNull(qNumOrText(cell));
+}
+
+function expressionPair(latitudeExpression, longitudeExpression) {
+  return `((${latitudeExpression}) & '|' & (${longitudeExpression}))`;
+}
+
+async function runAnalysisCube(client, { dimensionField = null, measures, qType }) {
+  const definition = {
+    qInfo: { qType },
+    qHyperCubeDef: {
+      qDimensions: dimensionField ? [{ qDef: { qFieldDefs: [dimensionField], qFieldLabels: [dimensionField] } }] : [],
+      qMeasures: measures.map(({ label, expression }) => ({ qDef: { qDef: expression, qLabel: label } })),
+      qInitialDataFetch: [],
+      qReductionMode: "N",
+      qMode: "S"
+    }
+  };
+  const { handle, hyperCube } = await createSessionCube(client, definition);
+  const rows = await fetchAllStraightCubeRows(client, handle, hyperCube, { maxCellsPerPage: 9000 });
+  return { rows, hyperCube };
+}
+
+async function analyzeCoordinateFields(client, latitudeDefinition, longitudeDefinition) {
+  if (latitudeDefinition?.kind !== "field" || longitudeDefinition?.kind !== "field") {
+    return { available: false, reason: "complex-expression" };
+  }
+  const lat = latitudeDefinition.expression;
+  const lon = longitudeDefinition.expression;
+  const pair = expressionPair(lat, lon);
+  const measures = [
+    { label: "latMin", expression: `Min(${lat})` },
+    { label: "latMax", expression: `Max(${lat})` },
+    { label: "latDistinct", expression: `Count(DISTINCT ${lat})` },
+    { label: "lonMin", expression: `Min(${lon})` },
+    { label: "lonMax", expression: `Max(${lon})` },
+    { label: "lonDistinct", expression: `Count(DISTINCT ${lon})` },
+    { label: "pairDistinct", expression: `Count(DISTINCT ${pair})` }
+  ];
+  const { rows } = await runAnalysisCube(client, { measures, qType: "qlik_geojson_coordinate_analysis" });
+  const row = rows[0] ?? [];
+  return {
+    available: true,
+    latitude: {
+      min: numericCell(row[0]),
+      max: numericCell(row[1]),
+      distinct: numericCell(row[2])
+    },
+    longitude: {
+      min: numericCell(row[3]),
+      max: numericCell(row[4]),
+      distinct: numericCell(row[5])
+    },
+    distinctPairs: numericCell(row[6])
+  };
+}
+
+async function analyzeEntityCandidate(client, candidateField, latitudeDefinition, longitudeDefinition) {
+  if (latitudeDefinition?.kind !== "field" || longitudeDefinition?.kind !== "field") {
+    return { available: false, reason: "complex-expression" };
+  }
+  const lat = latitudeDefinition.expression;
+  const lon = longitudeDefinition.expression;
+  const pair = expressionPair(lat, lon);
+  const measures = [
+    { label: "pairCount", expression: `Count(DISTINCT ${pair})` },
+    { label: "latCount", expression: `Count(DISTINCT ${lat})` },
+    { label: "lonCount", expression: `Count(DISTINCT ${lon})` }
+  ];
+  const { rows } = await runAnalysisCube(client, {
+    dimensionField: candidateField,
+    measures,
+    qType: "qlik_geojson_entity_candidate_analysis"
+  });
+
+  let entityCount = 0;
+  let onePair = 0;
+  let multiplePairs = 0;
+  let withoutCoordinates = 0;
+  let maxPairs = 0;
+  for (const row of rows) {
+    const key = qTextOrNum(row[0]);
+    if (key === null || key === "") continue;
+    entityCount += 1;
+    const pairCount = numericCell(row[1]) ?? 0;
+    maxPairs = Math.max(maxPairs, pairCount);
+    if (pairCount === 1) onePair += 1;
+    else if (pairCount > 1) multiplePairs += 1;
+    else withoutCoordinates += 1;
+  }
+
+  return {
+    available: true,
+    entityCount,
+    onePair,
+    multiplePairs,
+    withoutCoordinates,
+    onePairRatio: entityCount ? onePair / entityCount : 0,
+    multiplePairRatio: entityCount ? multiplePairs / entityCount : 0,
+    missingRatio: entityCount ? withoutCoordinates / entityCount : 0,
+    maxPairs
+  };
+}
+
+function coordinateFieldExpression(field) {
+  return qlikFieldRef(field);
 }
 
 // ---- src/hypercube.js ----
@@ -365,7 +698,12 @@ function propertyExpression(definition) {
     case "max": return { field, label, expression: `Max(${qlikFieldRef(field)})` };
     case "min": return { field, label, expression: `Min(${qlikFieldRef(field)})` };
     case "maxTimestamp": return { field, label, expression: `Timestamp(Max(${qlikFieldRef(field)}), '${definition.format ?? "YYYY-MM-DD hh:mm:ss"}')` };
-    default: throw new Error(`Unsupported property aggregation: ${definition.aggregation}`);
+    default:
+      throw coreError(
+        ERROR_CODES.UNSUPPORTED_PROPERTY_AGGREGATION,
+        `Unsupported property aggregation: ${definition.aggregation}`,
+        { aggregation: definition.aggregation, field }
+      );
   }
 }
 
@@ -376,12 +714,29 @@ function normalizeMeasures(measures = []) {
   return measures.map((m) => typeof m === "string" ? { label: m, expression: m } : m);
 }
 
+function coordinateExpression(config, axis) {
+  const expression = config[`${axis}Expression`];
+  if (expression) return String(expression).replace(/^=/, "").trim();
+  const field = config[`${axis}Field`];
+  return field ? `Only(${qlikFieldRef(field)})` : null;
+}
+
 function buildPointCubeDefinition(config) {
   const propertyDefs = (config.properties ?? []).map(propertyExpression);
+  const latitudeExpression = coordinateExpression(config, "latitude");
+  const longitudeExpression = coordinateExpression(config, "longitude");
+  if (!latitudeExpression || !longitudeExpression) {
+    throw coreError(
+      ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+      "Latitude/longitude extraction definitions are missing.",
+      { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
+    );
+  }
+
   const attributeExpressions = [
     ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` })),
-    { qExpression: `Only(${qlikFieldRef(config.latitudeField)})`, qLabel: config.latitudeField, qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
-    { qExpression: `Only(${qlikFieldRef(config.longitudeField)})`, qLabel: config.longitudeField, qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
+    { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
+    { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
   ];
   const measures = normalizeMeasures(config.measures);
 
@@ -404,17 +759,20 @@ function buildPointCubeDefinition(config) {
       }
     },
     propertyDefs,
-    measures
+    measures,
+    coordinateExpressions: { latitude: latitudeExpression, longitude: longitudeExpression }
   };
 }
 
 async function createSessionCube(client, definition) {
   const result = await client.rpc(client.docHandle, "CreateSessionObject", [definition]);
   const handle = result?.qReturn?.qHandle;
-  if (typeof handle !== "number") throw new Error("CreateSessionObject did not return a valid handle.");
+  if (typeof handle !== "number") {
+    throw coreError(ERROR_CODES.SESSION_OBJECT_INVALID_HANDLE, "CreateSessionObject did not return a valid handle.");
+  }
   const layoutResult = await client.rpc(handle, "GetLayout", []);
   const hyperCube = layoutResult?.qLayout?.qHyperCube;
-  if (!hyperCube) throw new Error("GetLayout did not return qHyperCube.");
+  if (!hyperCube) throw coreError(ERROR_CODES.HYPERCUBE_LAYOUT_MISSING, "GetLayout did not return qHyperCube.");
   return { handle, hyperCube };
 }
 
@@ -439,7 +797,9 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
   attrInfo.forEach((info, index) => { if (info?.id) attrIndex.set(info.id, index); });
   const latIndex = attrIndex.get("__latitude");
   const lonIndex = attrIndex.get("__longitude");
-  if (latIndex === undefined || lonIndex === undefined) throw new Error("Latitude/longitude attribute expressions were not materialized.");
+  if (latIndex === undefined || lonIndex === undefined) {
+    throw coreError(ERROR_CODES.LAT_LON_ATTRIBUTES_MISSING, "Latitude/longitude attribute expressions were not materialized.");
+  }
 
   const featureCollection = { type: "FeatureCollection", name: config.name ?? "qlik_points", features: [] };
   const missing = [];
@@ -452,7 +812,7 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
     const entityKeyValue = qTextOrNum(dimensionCell);
     if (entityKeyValue === null || entityKeyValue === "") {
       if (config.skipNullEntities === false) {
-        throw new Error(`Row ${rowIndex}: null entity key.`);
+        throw coreError(ERROR_CODES.NULL_ENTITY_KEY, `Row ${rowIndex}: null entity key.`, { rowIndex });
       }
       skippedNullEntities.push({
         rowIndex,
@@ -461,7 +821,9 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
       return;
     }
     const keyString = String(entityKeyValue);
-    if (keys.has(keyString)) throw new Error(`Duplicate entity key: ${keyString}`);
+    if (keys.has(keyString)) {
+      throw coreError(ERROR_CODES.DUPLICATE_ENTITY_KEY, `Duplicate entity key: ${keyString}`, { key: keyString });
+    }
     keys.add(keyString);
 
     const attrValues = dimensionCell?.qAttrExps?.qValues ?? [];
@@ -482,11 +844,19 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
       if (override) {
         if (override.expected) {
           if (!Object.prototype.hasOwnProperty.call(properties, override.expected.field)) {
-            throw new Error(`Coordinate override ${keyString}: expected guard field ${override.expected.field} is not included in extracted properties.`);
+            throw coreError(
+              ERROR_CODES.OVERRIDE_GUARD_FIELD_MISSING,
+              `Coordinate override ${keyString}: expected guard field ${override.expected.field} is not included in extracted properties.`,
+              { key: keyString, field: override.expected.field }
+            );
           }
           const actual = properties[override.expected.field];
           if (String(actual) !== String(override.expected.value)) {
-            throw new Error(`Coordinate override ${keyString}: expected ${override.expected.field}=${override.expected.value}, got ${actual}.`);
+            throw coreError(
+              ERROR_CODES.OVERRIDE_GUARD_MISMATCH,
+              `Coordinate override ${keyString}: expected ${override.expected.field}=${override.expected.value}, got ${actual}.`,
+              { key: keyString, field: override.expected.field, expected: override.expected.value, actual }
+            );
           }
         }
         latitude = Number(override.latitude);
@@ -528,11 +898,18 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
 
 function validatePointGeoJSON(featureCollection) {
   const errors = [];
-  if (featureCollection?.type !== "FeatureCollection") errors.push("Root type is not FeatureCollection.");
+  if (featureCollection?.type !== "FeatureCollection") {
+    errors.push({ code: ERROR_CODES.GEOJSON_ROOT_INVALID, params: { actualType: featureCollection?.type ?? null } });
+  }
   for (const [index, feature] of (featureCollection?.features ?? []).entries()) {
-    if (feature?.geometry?.type !== "Point") { errors.push(`Feature ${index}: geometry is not Point.`); continue; }
+    if (feature?.geometry?.type !== "Point") {
+      errors.push({ code: ERROR_CODES.GEOJSON_GEOMETRY_INVALID, params: { index, actualType: feature?.geometry?.type ?? null } });
+      continue;
+    }
     const [lon, lat] = feature.geometry.coordinates ?? [];
-    if (!validCoordinates(lon, lat)) errors.push(`Feature ${index}: invalid coordinates.`);
+    if (!validCoordinates(lon, lat)) {
+      errors.push({ code: ERROR_CODES.GEOJSON_COORDINATES_INVALID, params: { index, longitude: lon ?? null, latitude: lat ?? null } });
+    }
   }
   return { valid: errors.length === 0, errors, featureCount: featureCollection?.features?.length ?? 0 };
 }
@@ -555,9 +932,47 @@ function downloadGeoJSON(filename, featureCollection) {
 }
 
 // ---- src/extractor.js ----
+function coordinateWarnings(layer, stats) {
+  const warnings = [];
+  if (layer.latitudeDefinition?.kind === "expression") {
+    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_COMPLEX_EXPRESSION, severity: "warning", params: { axis: "latitude", expression: layer.latitudeDefinition.raw } });
+  }
+  if (layer.longitudeDefinition?.kind === "expression") {
+    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_COMPLEX_EXPRESSION, severity: "warning", params: { axis: "longitude", expression: layer.longitudeDefinition.raw } });
+  }
+  if (!stats?.available) {
+    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_STATS_UNAVAILABLE, severity: "info", params: { reason: stats?.reason ?? "unknown" } });
+    return warnings;
+  }
+
+  const latInvalid = stats.latitude.min != null && stats.latitude.max != null && (stats.latitude.min < -90 || stats.latitude.max > 90);
+  const lonInvalid = stats.longitude.min != null && stats.longitude.max != null && (stats.longitude.min < -180 || stats.longitude.max > 180);
+  if (latInvalid || lonInvalid) {
+    warnings.push({
+      code: DIAGNOSTIC_CODES.COORDINATE_RANGE_INVALID,
+      severity: "error",
+      params: {
+        latitudeMin: stats.latitude.min,
+        latitudeMax: stats.latitude.max,
+        longitudeMin: stats.longitude.min,
+        longitudeMax: stats.longitude.max
+      }
+    });
+  }
+
+  const swapWouldFix = stats.latitude.min != null && stats.latitude.max != null && stats.longitude.min != null && stats.longitude.max != null &&
+    (stats.latitude.min < -90 || stats.latitude.max > 90) &&
+    stats.latitude.min >= -180 && stats.latitude.max <= 180 &&
+    stats.longitude.min >= -90 && stats.longitude.max <= 90;
+  if (swapWouldFix) {
+    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_SWAP_LIKELY, severity: "warning", params: {} });
+  }
+  return warnings;
+}
+
 class QlikGeoJSONExtractor {
-  constructor(connection = {}) {
-    this.client = new QixClient(connection);
+  constructor(connection = {}, dependencies = {}) {
+    this.client = dependencies.client ?? new QixClient(connection);
   }
 
   async probe({ appId, sheetId }) {
@@ -569,7 +984,7 @@ class QlikGeoJSONExtractor {
         result.identity = conn.identity;
       } catch (error) {
         result.websocket = "ERROR";
-        result.error = error.message;
+        result.error = serializeError(error);
         return result;
       }
 
@@ -578,7 +993,7 @@ class QlikGeoJSONExtractor {
         result.openDoc = "SUCCESS";
       } catch (error) {
         result.openDoc = "ERROR";
-        result.error = error.qlik ?? error.message;
+        result.error = serializeError(error);
         return result;
       }
 
@@ -586,15 +1001,19 @@ class QlikGeoJSONExtractor {
         try {
           const sheetResult = await this.client.rpc(this.client.docHandle, "GetObject", [sheetId]);
           const sheetHandle = sheetResult?.qReturn?.qHandle;
-          if (typeof sheetHandle !== "number") throw new Error("GetObject did not return a sheet handle.");
+          if (typeof sheetHandle !== "number") {
+            throw coreError(ERROR_CODES.SHEET_GET_FAILED, "GetObject did not return a sheet handle.", { sheetId });
+          }
           result.getSheet = "SUCCESS";
           const treeResult = await this.client.rpc(sheetHandle, "GetFullPropertyTree", []);
-          if (!treeResult?.qPropEntry) throw new Error("GetFullPropertyTree returned no qPropEntry.");
+          if (!treeResult?.qPropEntry) {
+            throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, "GetFullPropertyTree returned no qPropEntry.", { sheetId });
+          }
           result.getFullPropertyTree = "SUCCESS";
         } catch (error) {
           if (!result.getSheet) result.getSheet = "ERROR";
           else result.getFullPropertyTree = "ERROR";
-          result.error = error.qlik ?? error.message;
+          result.error = serializeError(error);
         }
       }
       return result;
@@ -603,56 +1022,109 @@ class QlikGeoJSONExtractor {
     }
   }
 
-  async inspect({ appId, sheetId }) {
+  async inspect({ appId, sheetId, candidateAnalysisLimit = 8 }) {
     try {
       await this.client.connectAndOpen(appId);
       const fields = await listAppFields(this.client);
+      const summarizedFields = summarizeFields(fields);
       const sheet = await inspectSheet(this.client, sheetId);
       const pointLayers = summarizePointLayers(sheet.pointLayers);
       const fieldByName = new Map(fields.map((field) => [field.qName, field]));
-      const suggestionsByLayer = pointLayers.map((layer) => ({
-        objectId: layer.objectId,
-        layerId: layer.layerId,
-        candidates: suggestEntityKeys(fields, {
-          latitudeField: layer.locationOrLatitude,
-          longitudeField: layer.longitude
-        })
-      }));
-      const diagnostics = pointLayers.map((layer) => {
-        const latCardinality = fieldByName.get(layer.locationOrLatitude)?.qCardinal ?? null;
-        const lonCardinality = fieldByName.get(layer.longitude)?.qCardinal ?? null;
-        const coordinateCardinality = Math.max(latCardinality ?? 0, lonCardinality ?? 0) || null;
+      const diagnostics = [];
+      const entityKeySuggestions = [];
+
+      for (const layer of pointLayers) {
+        let coordinateStats;
+        try {
+          coordinateStats = await analyzeCoordinateFields(this.client, layer.latitudeDefinition, layer.longitudeDefinition);
+        } catch (error) {
+          coordinateStats = { available: false, reason: "analysis-error", error: serializeError(error) };
+        }
+
+        const coordinateCardinality = coordinateStats?.distinctPairs ??
+          (Math.max(
+            fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? 0,
+            fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? 0
+          ) || null);
         const visualDimensions = layer.visualDimensions.map((name) => ({
           field: name,
           cardinality: fieldByName.get(name)?.qCardinal ?? null
         }));
-        const warnings = [];
+        const warnings = coordinateWarnings(layer, coordinateStats);
         for (const dim of visualDimensions) {
           if (coordinateCardinality && dim.cardinality && dim.cardinality < coordinateCardinality) {
-            warnings.push(`Visual dimension ${dim.field} cardinality (${dim.cardinality}) is lower than coordinate cardinality (${coordinateCardinality}); multiple physical entities may be aggregated.`);
+            warnings.push({
+              code: DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_CARDINALITY,
+              severity: "warning",
+              params: {
+                field: dim.field,
+                dimensionCardinality: dim.cardinality,
+                coordinateCardinality
+              }
+            });
           }
         }
-        return {
+
+        diagnostics.push({
           objectId: layer.objectId,
           layerId: layer.layerId,
-          latitudeField: layer.locationOrLatitude,
-          longitudeField: layer.longitude,
-          latitudeCardinality: latCardinality,
-          longitudeCardinality: lonCardinality,
+          latitudeField: layer.latitudeDefinition?.field,
+          longitudeField: layer.longitudeDefinition?.field,
+          latitudeDefinition: layer.latitudeDefinition,
+          longitudeDefinition: layer.longitudeDefinition,
+          latitudeCardinality: fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? coordinateStats?.latitude?.distinct ?? null,
+          longitudeCardinality: fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? coordinateStats?.longitude?.distinct ?? null,
           coordinateCardinality,
+          coordinateStats,
           visualDimensions,
           warnings
-        };
-      });
+        });
+
+        const pool = candidatePool(fields, {
+          coordinateCardinality,
+          latitudeField: layer.latitudeDefinition?.field,
+          longitudeField: layer.longitudeDefinition?.field,
+          visualDimensions: layer.visualDimensions,
+          limit: candidateAnalysisLimit
+        });
+        const spatialProfiles = {};
+        if (coordinateStats?.available) {
+          for (const fieldName of pool) {
+            try {
+              spatialProfiles[fieldName] = await analyzeEntityCandidate(
+                this.client,
+                fieldName,
+                layer.latitudeDefinition,
+                layer.longitudeDefinition
+              );
+            } catch (error) {
+              spatialProfiles[fieldName] = { available: false, reason: "analysis-error", error: serializeError(error) };
+            }
+          }
+        }
+
+        entityKeySuggestions.push({
+          objectId: layer.objectId,
+          layerId: layer.layerId,
+          candidates: suggestEntityKeys(fields, {
+            latitudeField: layer.latitudeDefinition?.field,
+            longitudeField: layer.longitudeDefinition?.field,
+            coordinateCardinality,
+            visualDimensions: layer.visualDimensions,
+            spatialProfiles
+          })
+        });
+      }
+
       return {
         appId,
         sheetId,
         fieldCount: fields.length,
-        fields: summarizeFields(fields),
+        fields: summarizedFields,
         objectCount: sheet.objects.length,
         pointLayers,
         diagnostics,
-        entityKeySuggestions: suggestionsByLayer
+        entityKeySuggestions
       };
     } finally {
       this.client.close();
@@ -660,8 +1132,17 @@ class QlikGeoJSONExtractor {
   }
 
   async extract(config) {
-    const required = ["appId", "entityKey", "latitudeField", "longitudeField"];
-    for (const key of required) if (!config[key]) throw new Error(`Missing extraction config: ${key}`);
+    const required = ["appId", "entityKey"];
+    for (const key of required) {
+      if (!config[key]) throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, `Missing extraction config: ${key}`, { key });
+    }
+    if (!(config.latitudeField || config.latitudeExpression)) {
+      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: latitude", { key: "latitudeField|latitudeExpression" });
+    }
+    if (!(config.longitudeField || config.longitudeExpression)) {
+      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: longitude", { key: "longitudeField|longitudeExpression" });
+    }
+
     try {
       await this.client.connectAndOpen(config.appId);
       const { definition, propertyDefs, measures } = buildPointCubeDefinition(config);
@@ -670,14 +1151,21 @@ class QlikGeoJSONExtractor {
       const converted = rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures);
       const validation = validatePointGeoJSON(converted.featureCollection);
       if (config.requireAllCoordinates !== false && converted.missing.length) {
-        const error = new Error(`${converted.missing.length} entities have no valid coordinates.`);
-        error.missing = converted.missing;
+        const error = coreError(
+          ERROR_CODES.MISSING_COORDINATES,
+          `${converted.missing.length} entities have no valid coordinates.`,
+          { count: converted.missing.length },
+          { missing: converted.missing }
+        );
         throw error;
       }
       if (!validation.valid) {
-        const error = new Error("Generated GeoJSON failed validation.");
-        error.validation = validation;
-        throw error;
+        throw coreError(
+          ERROR_CODES.GEOJSON_VALIDATION_FAILED,
+          "Generated GeoJSON failed validation.",
+          { errorCount: validation.errors.length },
+          { validation }
+        );
       }
       return {
         ...converted,
@@ -693,17 +1181,31 @@ class QlikGeoJSONExtractor {
 }
 
   global.QlikGeoJSONExtractor = Object.freeze({
+    ERROR_CODES,
+    DIAGNOSTIC_CODES,
+    EVIDENCE_CODES,
+    QlikGeoJSONError,
+    coreError,
+    serializeError,
     QixClient,
     QlikGeoJSONExtractor,
+    coordinateWarnings,
     listAppFields,
     summarizeFields,
     suggestEntityKeys,
+    candidatePool,
+    scoreEntityCandidate,
     inspectSheet,
     summarizePointLayers,
     walkPropertyTree,
+    coordinateDefinition,
+    analyzeCoordinateFields,
+    analyzeEntityCandidate,
     buildPointCubeDefinition,
     createSessionCube,
     fetchAllStraightCubeRows,
+    propertyExpression,
+    normalizeMeasures,
     rowsToPointGeoJSON,
     validatePointGeoJSON,
     downloadJSON,
@@ -718,6 +1220,7 @@ class QlikGeoJSONExtractor {
     wazeUrl,
     uniquePropertyName,
     joinBasePath,
-    deepClone
+    deepClone,
+    resolveSimpleQlikFieldReference
   });
 })(globalThis);
