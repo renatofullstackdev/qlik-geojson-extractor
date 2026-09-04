@@ -9,7 +9,7 @@ Extensão Manifest V3 com Side Panel para o núcleo `qlik-geojson-extractor`.
 3. conceda acesso ao host Qlik atual;
 4. teste a conexão;
 5. inspecione o PointLayer;
-6. valide latitude/longitude;
+6. valide a fonte espacial detectada (latitude/longitude ou localização);
 7. escolha explicitamente a chave da entidade física;
 8. selecione propriedades;
 9. gere e valide o GeoJSON;
@@ -37,19 +37,21 @@ https://example.test/sense/app/APP/sheet/SHEET
 
 A extensão detecta esse valor automaticamente.
 
-## Coordenadas
+## Fonte espacial
 
-A configuração do próprio PointLayer é a primeira fonte de verdade. Referências simples são convertidas para campos; expressões complexas são preservadas. Para campos diretos, a extensão calcula estatísticas e pares distintos antes da extração.
+A configuração do próprio PointLayer é a primeira fonte de verdade. `isLatLong=true` apresenta latitude/longitude; `isLatLong=false` apresenta uma única localização. Referências simples são convertidas para campos e expressões complexas são preservadas mesmo sem `=` inicial.
+
+No modo de localização, campos `$geopoint` e campos referenciados pela expressão são destacados. A conversão automática para GeoJSON aceita somente o ponto nativo Qlik `[longitude, latitude]`; não há geocodificação de nomes/endereço.
 
 ## Chave física
 
 Os candidatos são classificados por comportamento espacial e evidências auxiliares. Um `$key` do Qlik recebe peso pequeno: `$key` significa participação no modelo associativo, não necessariamente identidade geográfica.
 
-A evidência mais importante é quantos valores do candidato mapeiam para **exatamente um par de coordenadas**. Valores com múltiplos pares recebem forte penalidade.
+A evidência mais importante é quantos valores do candidato mapeiam para **exatamente uma representação espacial**. No modo de coordenadas isso significa um par lat/lon; no modo de localização significa um valor de localização. Valores associados a múltiplas representações recebem forte penalidade.
 
 ## Propriedades em lote
 
-A UI permite selecionar campos filtrados, selecionar campos relacionados às tabelas da entidade/coordenadas, limpar a seleção e aplicar uma agregação em lote.
+A UI permite selecionar campos filtrados, selecionar campos relacionados às tabelas da entidade/fonte espacial, limpar a seleção e aplicar uma agregação em lote.
 
 ## Permissões
 

@@ -4,11 +4,13 @@ Ferramenta **browser-first** para inspecionar `PointLayer`s do Qlik Sense, ident
 
 A interface recomendada para uso cotidiano é a extensão Chrome em `chrome-extension/`. O bundle de DevTools continua disponível para diagnóstico e desenvolvimento.
 
+> **Política de exemplos:** o único painel concreto documentado é o painel público **Locais de Votação do TRE-DF**. Testes de regressão usam dados sintéticos. Identificadores de painéis internos não devem ser registrados no repositório.
+
 ## Objetivo da versão 1.0
 
 A ferramenta faz uma coisa deliberadamente bem:
 
-> inspeciona um `PointLayer`, ajuda o usuário a validar latitude/longitude e a escolher uma chave física adequada, e produz um GeoJSON `Point` auditável.
+> inspeciona um `PointLayer`, identifica sua fonte espacial (latitude/longitude ou localização única), ajuda o usuário a escolher uma chave física adequada e produz um GeoJSON `Point` auditável.
 
 Não há suporte 1.0 para `AreaLayer`, `LineLayer`, geocodificação textual ou planejamento de rotas.
 
@@ -27,7 +29,7 @@ Testar conexão
   ↓
 Inspecionar
   ↓
-confirmar PointLayer e coordenadas
+confirmar PointLayer e fonte espacial
   ↓
 revisar candidatos à chave física
   ↓
@@ -78,9 +80,14 @@ Nesse exemplo, o proxy virtual é:
 
 Na maior parte dos ambientes o valor é vazio. A extensão detecta o prefixo pela URL; por isso o campo fica oculto no modo básico e não possui placeholder que sugira um valor arbitrário.
 
-## Estratégia de latitude/longitude
+## Estratégia da fonte espacial
 
-A prioridade é a própria configuração do `PointLayer`:
+A prioridade é a própria configuração do `PointLayer`. O core não presume que todo `PointLayer` use duas colunas de coordenadas:
+
+- `isLatLong=true` → modo `coordinates`, com latitude e longitude independentes;
+- `isLatLong=false` → modo `location`, com uma única fonte de localização.
+
+No modo `coordinates`:
 
 1. se o layer referencia um campo simples, por exemplo `=LATITUDE` ou `=[Latitude]`, o campo é normalizado e usado como candidato de alta confiança;
 2. se o layer usa uma expressão Qlik complexa, por exemplo `=Avg([Latitude])`, a expressão é **preservada**, e não convertida artificialmente em nome de campo;
@@ -89,16 +96,24 @@ A prioridade é a própria configuração do `PointLayer`:
 5. se uma troca lat/lon corrigiria um intervalo inválido, a ferramenta emite aviso de possível inversão;
 6. o usuário sempre pode escolher explicitamente outro campo.
 
+No modo `location`:
+
+1. `locationOrLatitude` é tratado como localização, não como latitude;
+2. configurações residuais de longitude são preservadas apenas para diagnóstico e ignoradas operacionalmente;
+3. referências simples viram campos e expressões Qlik complexas são preservadas mesmo quando não começam com `=`;
+4. campos `$geopoint` e campos referenciados pela expressão são destacados na interface;
+5. para gerar `Point` sem serviço externo, a extensão converte somente o formato nativo Qlik `[longitude, latitude]`; nomes, endereços, WKT e outras representações não são geocodificados nem adivinhados.
+
 A ferramenta não tenta inferir inversão quando ambos os conjuntos de valores são matematicamente válidos; isso exigiria contexto geográfico adicional.
 
 ## Estratégia de chave física
 
-A heurística 1.0 não depende apenas de `$key`, nomes `ID/COD` ou cardinalidade. Para os candidatos mais promissores, a ferramenta mede a relação real com as coordenadas.
+A heurística 1.0 não depende apenas de `$key`, nomes `ID/COD` ou cardinalidade. Para os candidatos mais promissores, a ferramenta mede a relação real com a representação espacial ativa.
 
 Evidências positivas:
 
-- até **+40**: proporção de valores que mapeiam para exatamente um par de coordenadas;
-- **+20**: mesma tabela-fonte de latitude/longitude;
+- até **+40**: proporção de valores que mapeiam para exatamente uma representação espacial;
+- **+20**: mesma tabela-fonte da fonte espacial;
 - até **+15**: cardinalidade próxima da cardinalidade espacial;
 - **+10**: campo usado como dimensão visual do mapa;
 - **+5**: tag Qlik `$key`;
@@ -107,8 +122,8 @@ Evidências positivas:
 
 Penalidades:
 
-- até **−50**: valores do candidato associados a múltiplos pares de coordenadas;
-- até **−30**: valores sem coordenadas.
+- até **−50**: valores do candidato associados a múltiplas representações espaciais;
+- até **−30**: valores sem representação espacial.
 
 A UI mostra **confiança alta/média/baixa**, a pontuação e as evidências. O score é explicativo; não autoriza seleção automática.
 
@@ -124,7 +139,7 @@ A seção de propriedades oferece:
 
 - busca por nome do campo e tabela-fonte;
 - **Selecionar filtrados**;
-- **Selecionar relacionados**, usando tabelas-fonte compartilhadas com entidade/coordenadas;
+- **Selecionar relacionados**, usando tabelas-fonte compartilhadas com entidade/fonte espacial;
 - **Limpar seleção**;
 - aplicação em lote de `Only`, `Concat distinct`, `Max`, `Min` ou `Max timestamp`;
 - aviso quando muitos campos são selecionados.
@@ -140,8 +155,8 @@ A mensagem principal exibida ao usuário é localizada. Mensagens técnicas orig
 O relatório JSON de diagnóstico registra, sem armazenar o dataset extraído:
 
 - PointLayer selecionado;
-- definição de latitude/longitude;
-- estatísticas das coordenadas;
+- modo e definição da fonte espacial;
+- estatísticas espaciais disponíveis;
 - warnings estruturados;
 - chave física escolhida e sua avaliação;
 - contagens da extração;

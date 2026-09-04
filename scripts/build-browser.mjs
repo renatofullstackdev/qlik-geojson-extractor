@@ -23,12 +23,12 @@ const modules = [
 
 const apiNames = [
   "ERROR_CODES", "DIAGNOSTIC_CODES", "EVIDENCE_CODES", "QlikGeoJSONError", "coreError", "serializeError",
-  "QixClient", "QlikGeoJSONExtractor", "coordinateWarnings", "listAppFields", "summarizeFields", "suggestEntityKeys", "candidatePool", "scoreEntityCandidate",
-  "inspectSheet", "summarizePointLayers", "walkPropertyTree", "coordinateDefinition", "analyzeCoordinateFields", "analyzeEntityCandidate",
-  "buildPointCubeDefinition", "createSessionCube", "fetchAllStraightCubeRows", "propertyExpression", "normalizeMeasures",
+  "QixClient", "QlikGeoJSONExtractor", "coordinateWarnings", "spatialWarnings", "listAppFields", "summarizeFields", "suggestEntityKeys", "candidatePool", "scoreEntityCandidate",
+  "inspectSheet", "summarizePointLayers", "walkPropertyTree", "coordinateDefinition", "analyzeCoordinateFields", "analyzeLocationField", "analyzeSpatialSource", "analyzeEntityCandidate", "spatialSourceFields",
+  "buildPointCubeDefinition", "createSessionCube", "fetchAllStraightCubeRows", "propertyExpression", "normalizeMeasures", "spatialModeFromConfig",
   "rowsToPointGeoJSON", "validatePointGeoJSON", "downloadJSON", "downloadGeoJSON", "normalizeName", "qlikFieldRef",
   "qTextOrNum", "qNumOrText", "numberOrNull", "validCoordinates", "googleMapsUrl", "wazeUrl", "uniquePropertyName",
-  "joinBasePath", "deepClone", "resolveSimpleQlikFieldReference"
+  "joinBasePath", "deepClone", "resolveSimpleQlikFieldReference", "looksLikeQlikExpression", "extractQlikFieldReferences", "parseQlikPoint"
 ];
 
 function stripModuleSyntax(source) {

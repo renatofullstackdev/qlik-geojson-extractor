@@ -22,6 +22,7 @@ const ERROR_CODES = Object.freeze({
   SESSION_OBJECT_INVALID_HANDLE: "SESSION_OBJECT_INVALID_HANDLE",
   HYPERCUBE_LAYOUT_MISSING: "HYPERCUBE_LAYOUT_MISSING",
   LAT_LON_ATTRIBUTES_MISSING: "LAT_LON_ATTRIBUTES_MISSING",
+  LOCATION_ATTRIBUTE_MISSING: "LOCATION_ATTRIBUTE_MISSING",
   NULL_ENTITY_KEY: "NULL_ENTITY_KEY",
   DUPLICATE_ENTITY_KEY: "DUPLICATE_ENTITY_KEY",
   OVERRIDE_GUARD_FIELD_MISSING: "OVERRIDE_GUARD_FIELD_MISSING",
@@ -37,16 +38,23 @@ const ERROR_CODES = Object.freeze({
 
 const DIAGNOSTIC_CODES = Object.freeze({
   VISUAL_DIMENSION_LOWER_CARDINALITY: "VISUAL_DIMENSION_LOWER_CARDINALITY",
+  VISUAL_DIMENSION_LOWER_SPATIAL_CARDINALITY: "VISUAL_DIMENSION_LOWER_SPATIAL_CARDINALITY",
   COORDINATE_COMPLEX_EXPRESSION: "COORDINATE_COMPLEX_EXPRESSION",
+  LOCATION_COMPLEX_EXPRESSION: "LOCATION_COMPLEX_EXPRESSION",
   COORDINATE_RANGE_INVALID: "COORDINATE_RANGE_INVALID",
   COORDINATE_SWAP_LIKELY: "COORDINATE_SWAP_LIKELY",
-  COORDINATE_STATS_UNAVAILABLE: "COORDINATE_STATS_UNAVAILABLE"
+  COORDINATE_STATS_UNAVAILABLE: "COORDINATE_STATS_UNAVAILABLE",
+  SPATIAL_STATS_UNAVAILABLE: "SPATIAL_STATS_UNAVAILABLE",
+  INACTIVE_LONGITUDE_IGNORED: "INACTIVE_LONGITUDE_IGNORED"
 });
 
 const EVIDENCE_CODES = Object.freeze({
   SPATIAL_ONE_PAIR_RATIO: "SPATIAL_ONE_PAIR_RATIO",
   SPATIAL_MULTIPLE_PAIRS: "SPATIAL_MULTIPLE_PAIRS",
   SPATIAL_MISSING_COORDINATES: "SPATIAL_MISSING_COORDINATES",
+  SPATIAL_ONE_REPRESENTATION_RATIO: "SPATIAL_ONE_REPRESENTATION_RATIO",
+  SPATIAL_MULTIPLE_REPRESENTATIONS: "SPATIAL_MULTIPLE_REPRESENTATIONS",
+  SPATIAL_MISSING_REPRESENTATION: "SPATIAL_MISSING_REPRESENTATION",
   SAME_SOURCE_TABLE: "SAME_SOURCE_TABLE",
   CARDINALITY_CLOSE: "CARDINALITY_CLOSE",
   VISUAL_DIMENSION: "VISUAL_DIMENSION",
@@ -97,6 +105,52 @@ function qlikFieldRef(fieldName) {
   return `[${String(fieldName).replace(/]/g, "]]" )}]`;
 }
 
+function extractQlikFieldReferences(value) {
+  const text = String(value ?? "");
+  const fields = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== "[") continue;
+    let field = "";
+    let closed = false;
+    for (i += 1; i < text.length; i += 1) {
+      if (text[i] !== "]") {
+        field += text[i];
+        continue;
+      }
+      if (text[i + 1] === "]") {
+        field += "]";
+        i += 1;
+        continue;
+      }
+      closed = true;
+      break;
+    }
+    if (closed && field && !fields.includes(field)) fields.push(field);
+  }
+  return fields;
+}
+
+/**
+ * Returns true only for syntax that is strongly indicative of a Qlik
+ * expression. The function deliberately avoids treating punctuation that is
+ * common in field names (spaces, parentheses in labels, slashes, hyphens) as
+ * sufficient evidence by itself.
+ */
+function looksLikeQlikExpression(value) {
+  let raw = String(value ?? "").trim();
+  if (!raw) return false;
+  if (raw.startsWith("=")) raw = raw.slice(1).trim();
+  if (!raw) return false;
+
+  // Function call at the beginning, e.g. Only(...), maxstring(...), If(...).
+  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*\s*\(/u.test(raw)) return true;
+  // Set analysis / aggregation fragments.
+  if (/\{\s*</.test(raw) || />\s*\}/.test(raw)) return true;
+  // Explicit expression operators around field references or literals.
+  if (/(?:\[[^\]]+\]|\)|\d|['"])[ \t]*(?:\+|\*|&|\/|<=|>=|<>|=)[ \t]*(?:\[[^\]]+\]|\(|\d|['"])/u.test(raw)) return true;
+  return false;
+}
+
 /**
  * Resolves Qlik references that are only a direct field reference.
  *
@@ -105,9 +159,11 @@ function qlikFieldRef(fieldName) {
  *   =LATITUDE               -> LATITUDE
  *   [ENTITY NAME]           -> ENTITY NAME
  *   =[ENTITY NAME]          -> ENTITY NAME
+ *   Field With Spaces         -> Field With Spaces
  *
  * Complex expressions are deliberately not guessed:
  *   =Only([LATITUDE])       -> null
+ *   maxstring([Location])   -> null
  */
 function resolveSimpleQlikFieldReference(value) {
   const raw = String(value ?? "").trim();
@@ -139,15 +195,15 @@ function resolveSimpleQlikFieldReference(value) {
     return fieldName || null;
   }
 
-  if (!hadEquals) return expression;
+  if (looksLikeQlikExpression(expression)) return null;
 
-  // A leading '=' makes the value a Qlik expression. Only accept the
-  // expression when it is clearly a bare field identifier.
-  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression)) {
-    return expression;
+  if (hadEquals) {
+    // A leading '=' makes the value a Qlik expression. Only accept it when it
+    // is clearly a bare field identifier.
+    return /^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression) ? expression : null;
   }
 
-  return null;
+  return expression;
 }
 
 function qTextOrNum(value) {
@@ -177,6 +233,28 @@ function numberOrNull(value) {
 function validCoordinates(longitude, latitude) {
   return Number.isFinite(longitude) && Number.isFinite(latitude) &&
     longitude >= -180 && longitude <= 180 && latitude >= -90 && latitude <= 90;
+}
+
+/**
+ * Parses only the native Qlik point representation: [longitude, latitude].
+ * It intentionally does not geocode names/addresses and does not guess WKT or
+ * arbitrary delimited strings.
+ */
+function parseQlikPoint(value) {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    const text = candidate.trim();
+    if (!text.startsWith("[") || !text.endsWith("]")) return null;
+    try {
+      candidate = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(candidate) || candidate.length !== 2) return null;
+  const longitude = numberOrNull(candidate[0]);
+  const latitude = numberOrNull(candidate[1]);
+  return validCoordinates(longitude, latitude) ? { longitude, latitude } : null;
 }
 
 function googleMapsUrl(longitude, latitude) {
@@ -353,24 +431,41 @@ function summarizeFields(fields) {
   }));
 }
 
-function hasSharedSource(field, coordinateFields) {
+function hasSharedSource(field, spatialFields) {
   const sources = new Set(field.qSrcTables ?? []);
-  return coordinateFields.some((coordinate) => (coordinate?.qSrcTables ?? []).some((table) => sources.has(table)));
+  return spatialFields.some((spatial) => (spatial?.qSrcTables ?? []).some((table) => sources.has(table)));
+}
+
+function profileRatios(profile) {
+  if (!profile) return null;
+  return {
+    one: profile.oneRepresentationRatio ?? profile.onePairRatio ?? 0,
+    multiple: profile.multipleRepresentationRatio ?? profile.multiplePairRatio ?? 0,
+    missing: profile.missingRatio ?? 0,
+    oneCount: profile.oneRepresentation ?? profile.onePair ?? 0,
+    multipleCount: profile.multipleRepresentations ?? profile.multiplePairs ?? 0,
+    missingCount: profile.withoutSpatial ?? profile.withoutCoordinates ?? 0
+  };
 }
 
 function confidenceFromProfile(profile) {
   if (!profile?.available || !profile.entityCount) return "unknown";
-  if (profile.onePairRatio >= 0.98 && profile.multiplePairRatio === 0 && profile.missingRatio <= 0.02) return "high";
-  if (profile.onePairRatio >= 0.9 && profile.multiplePairRatio <= 0.05 && profile.missingRatio <= 0.1) return "medium";
+  const ratios = profileRatios(profile);
+  if (ratios.one >= 0.98 && ratios.multiple === 0 && ratios.missing <= 0.02) return "high";
+  if (ratios.one >= 0.9 && ratios.multiple <= 0.05 && ratios.missing <= 0.1) return "medium";
   return "low";
 }
 
 function scoreEntityCandidate(field, {
+  spatialCardinality = null,
   coordinateCardinality = null,
   visualDimensions = [],
+  spatialFields = [],
   coordinateFields = [],
   spatialProfile = null
 } = {}) {
+  const targetCardinality = spatialCardinality ?? coordinateCardinality;
+  const effectiveSpatialFields = spatialFields.length ? spatialFields : coordinateFields;
   const name = normalizeName(field.qName);
   let score = 0;
   const evidence = [];
@@ -380,40 +475,41 @@ function scoreEntityCandidate(field, {
   };
 
   if ((field.qTags ?? []).includes("$key")) add(EVIDENCE_CODES.TAG_KEY, 5);
-  if (/^(ID|COD|KEY|CHAVE)_/.test(name) || /_(ID|COD|KEY|CHAVE)$/.test(name)) {
+  if (/^(ID|COD|CODIGO|KEY|CHAVE)_/.test(name) || /_(ID|COD|CODIGO|KEY|CHAVE)$/.test(name)) {
     add(EVIDENCE_CODES.NAME_KEY_LIKE, 5);
   }
-  if (/(OBJETO|ENTIDADE|ENTITY|LOCAL|LOCATION|CIRCUNSCRICAO)/.test(name)) {
+  if (/(OBJETO|ENTIDADE|ENTITY|LOCAL|LOCATION|CIRCUNSCRICAO|UNIDADE)/.test(name)) {
     add(EVIDENCE_CODES.NAME_SPATIAL_ENTITY_LIKE, 5);
   }
   if (visualDimensions.includes(field.qName)) add(EVIDENCE_CODES.VISUAL_DIMENSION, 10);
-  if (hasSharedSource(field, coordinateFields)) add(EVIDENCE_CODES.SAME_SOURCE_TABLE, 20);
+  if (hasSharedSource(field, effectiveSpatialFields)) add(EVIDENCE_CODES.SAME_SOURCE_TABLE, 20);
 
-  if (coordinateCardinality && Number.isFinite(field.qCardinal)) {
-    const ratio = Math.abs(field.qCardinal - coordinateCardinality) / Math.max(1, coordinateCardinality);
+  if (targetCardinality && Number.isFinite(field.qCardinal)) {
+    const ratio = Math.abs(field.qCardinal - targetCardinality) / Math.max(1, targetCardinality);
     const weight = ratio <= 0.02 ? 15 : ratio <= 0.1 ? 10 : ratio <= 0.25 ? 5 : 0;
-    if (weight) add(EVIDENCE_CODES.CARDINALITY_CLOSE, weight, { coordinateCardinality, fieldCardinality: field.qCardinal });
+    if (weight) add(EVIDENCE_CODES.CARDINALITY_CLOSE, weight, { spatialCardinality: targetCardinality, coordinateCardinality: targetCardinality, fieldCardinality: field.qCardinal });
   }
 
   if (spatialProfile?.available && spatialProfile.entityCount) {
-    const onePairWeight = Math.round(40 * spatialProfile.onePairRatio);
-    if (onePairWeight) add(EVIDENCE_CODES.SPATIAL_ONE_PAIR_RATIO, onePairWeight, {
-      onePair: spatialProfile.onePair,
+    const ratios = profileRatios(spatialProfile);
+    const oneWeight = Math.round(40 * ratios.one);
+    if (oneWeight) add(EVIDENCE_CODES.SPATIAL_ONE_REPRESENTATION_RATIO, oneWeight, {
+      oneRepresentation: ratios.oneCount,
       entityCount: spatialProfile.entityCount,
-      ratio: spatialProfile.onePairRatio
+      ratio: ratios.one
     });
-    if (spatialProfile.multiplePairs) {
-      add(EVIDENCE_CODES.SPATIAL_MULTIPLE_PAIRS, -Math.max(10, Math.round(50 * spatialProfile.multiplePairRatio)), {
-        multiplePairs: spatialProfile.multiplePairs,
+    if (ratios.multipleCount) {
+      add(EVIDENCE_CODES.SPATIAL_MULTIPLE_REPRESENTATIONS, -Math.max(10, Math.round(50 * ratios.multiple)), {
+        multipleRepresentations: ratios.multipleCount,
         entityCount: spatialProfile.entityCount,
-        ratio: spatialProfile.multiplePairRatio
+        ratio: ratios.multiple
       });
     }
-    if (spatialProfile.withoutCoordinates) {
-      add(EVIDENCE_CODES.SPATIAL_MISSING_COORDINATES, -Math.max(5, Math.round(30 * spatialProfile.missingRatio)), {
-        withoutCoordinates: spatialProfile.withoutCoordinates,
+    if (ratios.missingCount) {
+      add(EVIDENCE_CODES.SPATIAL_MISSING_REPRESENTATION, -Math.max(5, Math.round(30 * ratios.missing)), {
+        withoutSpatial: ratios.missingCount,
         entityCount: spatialProfile.entityCount,
-        ratio: spatialProfile.missingRatio
+        ratio: ratios.missing
       });
     }
   }
@@ -429,25 +525,27 @@ function scoreEntityCandidate(field, {
 }
 
 function candidatePool(fields, {
+  spatialCardinality = null,
   coordinateCardinality = null,
+  spatialFieldNames = [],
   latitudeField,
   longitudeField,
   visualDimensions = [],
   limit = 8
 } = {}) {
-  const coordinateFields = [
-    fields.find((f) => f.qName === latitudeField),
-    fields.find((f) => f.qName === longitudeField)
-  ].filter(Boolean);
-  const maxCardinality = coordinateCardinality
-    ? Math.max(coordinateCardinality + 100, coordinateCardinality * 4)
+  const targetCardinality = spatialCardinality ?? coordinateCardinality ??
+    (visualDimensions.length === 1 ? fields.find((field) => field.qName === visualDimensions[0])?.qCardinal ?? null : null);
+  const names = spatialFieldNames.length ? spatialFieldNames : [latitudeField, longitudeField].filter(Boolean);
+  const spatialFields = names.map((name) => fields.find((f) => f.qName === name)).filter(Boolean);
+  const maxCardinality = targetCardinality
+    ? Math.max(targetCardinality + 100, targetCardinality * 4)
     : 5000;
 
   const preliminary = fields
     .filter((field) => Number.isFinite(field.qCardinal) && field.qCardinal > 0)
     .filter((field) => visualDimensions.includes(field.qName) || field.qCardinal <= maxCardinality)
-    .map((field) => scoreEntityCandidate(field, { coordinateCardinality, visualDimensions, coordinateFields }))
-    .sort((a, b) => b.score - a.score || Math.abs((a.cardinality ?? 0) - (coordinateCardinality ?? 0)) - Math.abs((b.cardinality ?? 0) - (coordinateCardinality ?? 0)));
+    .map((field) => scoreEntityCandidate(field, { spatialCardinality: targetCardinality, visualDimensions, spatialFields }))
+    .sort((a, b) => b.score - a.score || Math.abs((a.cardinality ?? 0) - (targetCardinality ?? 0)) - Math.abs((b.cardinality ?? 0) - (targetCardinality ?? 0)));
 
   const output = preliminary.slice(0, limit).map((item) => item.field);
   for (const dim of visualDimensions) {
@@ -457,23 +555,25 @@ function candidatePool(fields, {
 }
 
 function suggestEntityKeys(fields, {
+  spatialCardinality = null,
+  coordinateCardinality = null,
+  spatialFieldNames = [],
   latitudeField,
   longitudeField,
-  coordinateCardinality = null,
   visualDimensions = [],
   spatialProfiles = {},
   limit = 12
 } = {}) {
-  const lat = fields.find((f) => f.qName === latitudeField);
-  const lon = fields.find((f) => f.qName === longitudeField);
-  const target = coordinateCardinality ?? (Math.max(lat?.qCardinal ?? 0, lon?.qCardinal ?? 0) || null);
-  const coordinateFields = [lat, lon].filter(Boolean);
+  const names = spatialFieldNames.length ? spatialFieldNames : [latitudeField, longitudeField].filter(Boolean);
+  const spatialFields = names.map((name) => fields.find((f) => f.qName === name)).filter(Boolean);
+  const target = spatialCardinality ?? coordinateCardinality ??
+    (visualDimensions.length === 1 ? fields.find((field) => field.qName === visualDimensions[0])?.qCardinal ?? null : null);
 
   return fields
     .map((field) => scoreEntityCandidate(field, {
-      coordinateCardinality: target,
+      spatialCardinality: target,
       visualDimensions,
-      coordinateFields,
+      spatialFields,
       spatialProfile: spatialProfiles[field.qName] ?? null
     }))
     .filter((item) => item.score > 0 || visualDimensions.includes(item.field))
@@ -526,44 +626,77 @@ async function inspectSheet(client, sheetId) {
   return { sheetId, tree, objects, pointLayers };
 }
 
-function coordinateDefinition(rawValue) {
+function knownFieldSet(knownFields = []) {
+  return new Set(knownFields.map((item) => typeof item === "string" ? item : item?.qName ?? item?.name).filter(Boolean));
+}
+
+function coordinateDefinition(rawValue, knownFields = []) {
   const raw = String(rawValue ?? "").trim();
-  if (!raw) return { kind: "unknown", raw: null, field: null, expression: null };
+  if (!raw) return { kind: "unknown", raw: null, field: null, expression: null, referencedFields: [] };
+
+  const fields = knownFieldSet(knownFields);
+  const withoutEquals = raw.startsWith("=") ? raw.slice(1).trim() : raw;
+  if (fields.has(withoutEquals)) {
+    return { kind: "field", raw, field: withoutEquals, expression: qlikFieldRef(withoutEquals), referencedFields: [withoutEquals] };
+  }
+
   const field = resolveSimpleQlikFieldReference(raw);
-  if (field) {
-    return { kind: "field", raw, field, expression: qlikFieldRef(field) };
+  if (field && (!fields.size || fields.has(field) || !looksLikeQlikExpression(raw))) {
+    return { kind: "field", raw, field, expression: qlikFieldRef(field), referencedFields: [field] };
   }
-  if (raw.startsWith("=")) {
-    const expression = raw.slice(1).trim();
-    return { kind: "expression", raw, field: null, expression: expression || null };
+
+  if (looksLikeQlikExpression(raw) || raw.startsWith("=")) {
+    const expression = raw.startsWith("=") ? raw.slice(1).trim() : raw;
+    return {
+      kind: "expression",
+      raw,
+      field: null,
+      expression: expression || null,
+      referencedFields: extractQlikFieldReferences(expression)
+    };
   }
-  return { kind: "field", raw, field: raw, expression: qlikFieldRef(raw) };
+
+  return { kind: "unknown", raw, field: null, expression: null, referencedFields: [] };
 }
 
-function resolvedDimension(value) {
-  return resolveSimpleQlikFieldReference(value) ?? value ?? null;
+function resolvedDimension(value, knownFields) {
+  return coordinateDefinition(value, knownFields).field ?? resolveSimpleQlikFieldReference(value) ?? value ?? null;
 }
 
-function summarizePointLayers(pointLayers) {
+function summarizePointLayers(pointLayers, knownFields = []) {
   return pointLayers.map((item) => {
-    const latitudeRaw = item.layer?.locationOrLatitude?.key ?? null;
+    const locationRaw = item.layer?.locationOrLatitude?.key ?? null;
     const longitudeRaw = item.layer?.longitude?.key ?? null;
-    const latitudeDefinition = coordinateDefinition(latitudeRaw);
-    const longitudeDefinition = coordinateDefinition(longitudeRaw);
+    const isLatLong = item.layer?.isLatLong === true;
+    const primaryDefinition = coordinateDefinition(locationRaw, knownFields);
+    const configuredLongitudeDefinition = coordinateDefinition(longitudeRaw, knownFields);
+    const latitudeDefinition = isLatLong ? primaryDefinition : null;
+    const longitudeDefinition = isLatLong ? configuredLongitudeDefinition : null;
+    const locationDefinition = isLatLong ? null : primaryDefinition;
     const visualDimensionsRaw = item.layer?.qHyperCubeDef?.qDimensions
       ?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [];
+
+    const spatialSource = isLatLong
+      ? { type: "coordinates", latitudeDefinition, longitudeDefinition }
+      : { type: "location", locationDefinition };
 
     return {
       objectId: item.objectId,
       layerId: item.layerId,
       layerIndex: item.layerIndex,
-      isLatLong: !!item.layer?.isLatLong,
-      locationOrLatitude: latitudeDefinition.field ?? latitudeRaw,
-      longitude: longitudeDefinition.field ?? longitudeRaw,
+      isLatLong,
+      spatialMode: spatialSource.type,
+      spatialSource,
+      locationOrLatitude: primaryDefinition.field ?? primaryDefinition.expression ?? locationRaw,
+      longitude: isLatLong ? (configuredLongitudeDefinition.field ?? configuredLongitudeDefinition.expression ?? longitudeRaw) : null,
       latitudeDefinition,
       longitudeDefinition,
-      visualDimensions: visualDimensionsRaw.map(resolvedDimension),
-      locationOrLatitudeRaw: latitudeRaw,
+      locationDefinition,
+      // Preserve inactive configuration for diagnostics only. It must not be
+      // interpreted as an active longitude when isLatLong=false.
+      residualLongitudeDefinition: isLatLong ? null : configuredLongitudeDefinition,
+      visualDimensions: visualDimensionsRaw.map((value) => resolvedDimension(value, knownFields)),
+      locationOrLatitudeRaw: locationRaw,
       longitudeRaw,
       visualDimensionsRaw,
       measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,
@@ -599,7 +732,7 @@ async function runAnalysisCube(client, { dimensionField = null, measures, qType 
 
 async function analyzeCoordinateFields(client, latitudeDefinition, longitudeDefinition) {
   if (latitudeDefinition?.kind !== "field" || longitudeDefinition?.kind !== "field") {
-    return { available: false, reason: "complex-expression" };
+    return { available: false, type: "coordinates", reason: "complex-expression" };
   }
   const lat = latitudeDefinition.expression;
   const lon = longitudeDefinition.expression;
@@ -617,6 +750,7 @@ async function analyzeCoordinateFields(client, latitudeDefinition, longitudeDefi
   const row = rows[0] ?? [];
   return {
     available: true,
+    type: "coordinates",
     latitude: {
       min: numericCell(row[0]),
       max: numericCell(row[1]),
@@ -627,55 +761,137 @@ async function analyzeCoordinateFields(client, latitudeDefinition, longitudeDefi
       max: numericCell(row[4]),
       distinct: numericCell(row[5])
     },
-    distinctPairs: numericCell(row[6])
+    distinctPairs: numericCell(row[6]),
+    distinctRepresentations: numericCell(row[6])
   };
 }
 
-async function analyzeEntityCandidate(client, candidateField, latitudeDefinition, longitudeDefinition) {
-  if (latitudeDefinition?.kind !== "field" || longitudeDefinition?.kind !== "field") {
-    return { available: false, reason: "complex-expression" };
+async function analyzeLocationField(client, locationDefinition) {
+  if (locationDefinition?.kind !== "field") {
+    return { available: false, type: "location", reason: "complex-expression" };
   }
-  const lat = latitudeDefinition.expression;
-  const lon = longitudeDefinition.expression;
-  const pair = expressionPair(lat, lon);
-  const measures = [
-    { label: "pairCount", expression: `Count(DISTINCT ${pair})` },
-    { label: "latCount", expression: `Count(DISTINCT ${lat})` },
-    { label: "lonCount", expression: `Count(DISTINCT ${lon})` }
-  ];
+  const location = locationDefinition.expression;
   const { rows } = await runAnalysisCube(client, {
-    dimensionField: candidateField,
-    measures,
-    qType: "qlik_geojson_entity_candidate_analysis"
+    measures: [{ label: "locationDistinct", expression: `Count(DISTINCT ${location})` }],
+    qType: "qlik_geojson_location_analysis"
   });
+  const distinctRepresentations = numericCell(rows[0]?.[0]);
+  return {
+    available: true,
+    type: "location",
+    distinctLocations: distinctRepresentations,
+    distinctRepresentations
+  };
+}
 
+async function analyzeSpatialSource(client, spatialSource) {
+  if (spatialSource?.type === "coordinates") {
+    return analyzeCoordinateFields(client, spatialSource.latitudeDefinition, spatialSource.longitudeDefinition);
+  }
+  if (spatialSource?.type === "location") {
+    return analyzeLocationField(client, spatialSource.locationDefinition);
+  }
+  return { available: false, type: spatialSource?.type ?? "unknown", reason: "unknown-spatial-source" };
+}
+
+function profileFromRows(rows, representationIndex) {
   let entityCount = 0;
-  let onePair = 0;
-  let multiplePairs = 0;
-  let withoutCoordinates = 0;
-  let maxPairs = 0;
+  let oneRepresentation = 0;
+  let multipleRepresentations = 0;
+  let withoutSpatial = 0;
+  let maxRepresentations = 0;
+
   for (const row of rows) {
     const key = qTextOrNum(row[0]);
     if (key === null || key === "") continue;
     entityCount += 1;
-    const pairCount = numericCell(row[1]) ?? 0;
-    maxPairs = Math.max(maxPairs, pairCount);
-    if (pairCount === 1) onePair += 1;
-    else if (pairCount > 1) multiplePairs += 1;
-    else withoutCoordinates += 1;
+    const count = numericCell(row[representationIndex]) ?? 0;
+    maxRepresentations = Math.max(maxRepresentations, count);
+    if (count === 1) oneRepresentation += 1;
+    else if (count > 1) multipleRepresentations += 1;
+    else withoutSpatial += 1;
   }
 
   return {
     available: true,
     entityCount,
-    onePair,
-    multiplePairs,
-    withoutCoordinates,
-    onePairRatio: entityCount ? onePair / entityCount : 0,
-    multiplePairRatio: entityCount ? multiplePairs / entityCount : 0,
-    missingRatio: entityCount ? withoutCoordinates / entityCount : 0,
-    maxPairs
+    oneRepresentation,
+    multipleRepresentations,
+    withoutSpatial,
+    oneRepresentationRatio: entityCount ? oneRepresentation / entityCount : 0,
+    multipleRepresentationRatio: entityCount ? multipleRepresentations / entityCount : 0,
+    missingRatio: entityCount ? withoutSpatial / entityCount : 0,
+    maxRepresentations
   };
+}
+
+async function analyzeEntityCandidate(client, candidateField, spatialSourceOrLatitude, legacyLongitudeDefinition = null) {
+  // Backward-compatible signature: (client, field, latitudeDefinition, longitudeDefinition)
+  const spatialSource = spatialSourceOrLatitude?.type
+    ? spatialSourceOrLatitude
+    : { type: "coordinates", latitudeDefinition: spatialSourceOrLatitude, longitudeDefinition: legacyLongitudeDefinition };
+
+  if (spatialSource.type === "coordinates") {
+    const { latitudeDefinition, longitudeDefinition } = spatialSource;
+    if (latitudeDefinition?.kind !== "field" || longitudeDefinition?.kind !== "field") {
+      return { available: false, type: "coordinates", reason: "complex-expression" };
+    }
+    const lat = latitudeDefinition.expression;
+    const lon = longitudeDefinition.expression;
+    const pair = expressionPair(lat, lon);
+    const measures = [
+      { label: "representationCount", expression: `Count(DISTINCT ${pair})` },
+      { label: "latCount", expression: `Count(DISTINCT ${lat})` },
+      { label: "lonCount", expression: `Count(DISTINCT ${lon})` }
+    ];
+    const { rows } = await runAnalysisCube(client, {
+      dimensionField: candidateField,
+      measures,
+      qType: "qlik_geojson_entity_candidate_analysis"
+    });
+    const profile = profileFromRows(rows, 1);
+    return {
+      ...profile,
+      type: "coordinates",
+      // Compatibility aliases used by older consumers.
+      onePair: profile.oneRepresentation,
+      multiplePairs: profile.multipleRepresentations,
+      withoutCoordinates: profile.withoutSpatial,
+      onePairRatio: profile.oneRepresentationRatio,
+      multiplePairRatio: profile.multipleRepresentationRatio,
+      maxPairs: profile.maxRepresentations
+    };
+  }
+
+  if (spatialSource.type === "location") {
+    const definition = spatialSource.locationDefinition;
+    if (definition?.kind !== "field") {
+      return { available: false, type: "location", reason: "complex-expression" };
+    }
+    const location = definition.expression ?? qlikFieldRef(definition.field);
+    const { rows } = await runAnalysisCube(client, {
+      dimensionField: candidateField,
+      measures: [{ label: "representationCount", expression: `Count(DISTINCT ${location})` }],
+      qType: "qlik_geojson_entity_candidate_location_analysis"
+    });
+    return { ...profileFromRows(rows, 1), type: "location" };
+  }
+
+  return { available: false, type: spatialSource.type ?? "unknown", reason: "unknown-spatial-source" };
+}
+
+function spatialSourceFields(spatialSource) {
+  const definitions = spatialSource?.type === "coordinates"
+    ? [spatialSource.latitudeDefinition, spatialSource.longitudeDefinition]
+    : spatialSource?.type === "location"
+      ? [spatialSource.locationDefinition]
+      : [];
+  const output = [];
+  for (const definition of definitions) {
+    if (definition?.field && !output.includes(definition.field)) output.push(definition.field);
+    for (const field of definition?.referencedFields ?? []) if (!output.includes(field)) output.push(field);
+  }
+  return output;
 }
 
 function coordinateFieldExpression(field) {
@@ -714,31 +930,60 @@ function normalizeMeasures(measures = []) {
   return measures.map((m) => typeof m === "string" ? { label: m, expression: m } : m);
 }
 
-function coordinateExpression(config, axis) {
-  const expression = config[`${axis}Expression`];
+function configuredExpression(config, prefix) {
+  const expression = config[`${prefix}Expression`];
   if (expression) return String(expression).replace(/^=/, "").trim();
-  const field = config[`${axis}Field`];
+  const field = config[`${prefix}Field`];
   return field ? `Only(${qlikFieldRef(field)})` : null;
+}
+
+function spatialModeFromConfig(config = {}) {
+  if (config.spatialMode === "location" || config.locationField || config.locationExpression) return "location";
+  return "coordinates";
 }
 
 function buildPointCubeDefinition(config) {
   const propertyDefs = (config.properties ?? []).map(propertyExpression);
-  const latitudeExpression = coordinateExpression(config, "latitude");
-  const longitudeExpression = coordinateExpression(config, "longitude");
-  if (!latitudeExpression || !longitudeExpression) {
-    throw coreError(
-      ERROR_CODES.EXTRACTION_CONFIG_MISSING,
-      "Latitude/longitude extraction definitions are missing.",
-      { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
-    );
-  }
-
-  const attributeExpressions = [
-    ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` })),
-    { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
-    { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
-  ];
+  const spatialMode = spatialModeFromConfig(config);
   const measures = normalizeMeasures(config.measures);
+  const attributeExpressions = [
+    ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` }))
+  ];
+  const spatialExpressions = {};
+
+  if (spatialMode === "coordinates") {
+    const latitudeExpression = configuredExpression(config, "latitude");
+    const longitudeExpression = configuredExpression(config, "longitude");
+    if (!latitudeExpression || !longitudeExpression) {
+      throw coreError(
+        ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+        "Latitude/longitude extraction definitions are missing.",
+        { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
+      );
+    }
+    attributeExpressions.push(
+      { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
+      { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
+    );
+    spatialExpressions.latitude = latitudeExpression;
+    spatialExpressions.longitude = longitudeExpression;
+  } else {
+    const locationExpression = configuredExpression(config, "location");
+    if (!locationExpression) {
+      throw coreError(
+        ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+        "Location extraction definition is missing.",
+        { key: "locationField|locationExpression" }
+      );
+    }
+    attributeExpressions.push({
+      qExpression: locationExpression,
+      qLabel: config.locationField ?? "location",
+      qNumFormat: { qType: "U" },
+      id: "__location"
+    });
+    spatialExpressions.location = locationExpression;
+  }
 
   return {
     definition: {
@@ -760,7 +1005,12 @@ function buildPointCubeDefinition(config) {
     },
     propertyDefs,
     measures,
-    coordinateExpressions: { latitude: latitudeExpression, longitude: longitudeExpression }
+    spatialMode,
+    spatialExpressions,
+    // Compatibility for callers that used the old return property.
+    coordinateExpressions: spatialMode === "coordinates"
+      ? { latitude: spatialExpressions.latitude, longitude: spatialExpressions.longitude }
+      : null
   };
 }
 
@@ -795,10 +1045,15 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
   const attrInfo = hyperCube?.qDimensionInfo?.[0]?.qAttrExprInfo ?? [];
   const attrIndex = new Map();
   attrInfo.forEach((info, index) => { if (info?.id) attrIndex.set(info.id, index); });
+  const spatialMode = spatialModeFromConfig(config);
   const latIndex = attrIndex.get("__latitude");
   const lonIndex = attrIndex.get("__longitude");
-  if (latIndex === undefined || lonIndex === undefined) {
+  const locationIndex = attrIndex.get("__location");
+  if (spatialMode === "coordinates" && (latIndex === undefined || lonIndex === undefined)) {
     throw coreError(ERROR_CODES.LAT_LON_ATTRIBUTES_MISSING, "Latitude/longitude attribute expressions were not materialized.");
+  }
+  if (spatialMode === "location" && locationIndex === undefined) {
+    throw coreError(ERROR_CODES.LOCATION_ATTRIBUTE_MISSING, "Location attribute expression was not materialized.");
   }
 
   const featureCollection = { type: "FeatureCollection", name: config.name ?? "qlik_points", features: [] };
@@ -835,8 +1090,21 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
       properties[m.label] = qNumOrText(row[index + 1]);
     });
 
-    let latitude = numberOrNull(qNumOrText(attrValues[latIndex]));
-    let longitude = numberOrNull(qNumOrText(attrValues[lonIndex]));
+    let latitude = null;
+    let longitude = null;
+    let rawLocation = null;
+    if (spatialMode === "coordinates") {
+      latitude = numberOrNull(qNumOrText(attrValues[latIndex]));
+      longitude = numberOrNull(qNumOrText(attrValues[lonIndex]));
+    } else {
+      rawLocation = qTextOrNum(attrValues[locationIndex]);
+      if (config.locationOutput !== false) properties[config.locationOutput ?? "location"] = rawLocation;
+      const point = parseQlikPoint(rawLocation);
+      if (point) {
+        latitude = point.latitude;
+        longitude = point.longitude;
+      }
+    }
     let coordinateSource = config.coordinateSourceValue ?? "Qlik";
 
     if (!validCoordinates(longitude, latitude)) {
@@ -867,7 +1135,7 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
     }
 
     if (!validCoordinates(longitude, latitude)) {
-      missing.push({ ...properties, latitude: null, longitude: null });
+      missing.push({ ...properties, spatialMode, location: spatialMode === "location" ? rawLocation : undefined, latitude: null, longitude: null });
       return;
     }
 
@@ -888,6 +1156,7 @@ function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
 
   return {
     featureCollection,
+    spatialMode,
     missing,
     appliedOverrides,
     skippedNullEntities,
@@ -964,8 +1233,22 @@ function coordinateWarnings(layer, stats) {
     (stats.latitude.min < -90 || stats.latitude.max > 90) &&
     stats.latitude.min >= -180 && stats.latitude.max <= 180 &&
     stats.longitude.min >= -90 && stats.longitude.max <= 90;
-  if (swapWouldFix) {
-    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_SWAP_LIKELY, severity: "warning", params: {} });
+  if (swapWouldFix) warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_SWAP_LIKELY, severity: "warning", params: {} });
+  return warnings;
+}
+
+function spatialWarnings(layer, stats) {
+  if (layer.spatialMode === "coordinates") return coordinateWarnings(layer, stats);
+  const warnings = [];
+  const location = layer.locationDefinition;
+  if (location?.kind === "expression") {
+    warnings.push({ code: DIAGNOSTIC_CODES.LOCATION_COMPLEX_EXPRESSION, severity: "info", params: { expression: location.raw } });
+  }
+  if (!stats?.available) {
+    warnings.push({ code: DIAGNOSTIC_CODES.SPATIAL_STATS_UNAVAILABLE, severity: "info", params: { reason: stats?.reason ?? "unknown", spatialMode: "location" } });
+  }
+  if (layer.residualLongitudeDefinition?.raw) {
+    warnings.push({ code: DIAGNOSTIC_CODES.INACTIVE_LONGITUDE_IGNORED, severity: "info", params: { raw: layer.residualLongitudeDefinition.raw } });
   }
   return warnings;
 }
@@ -1001,14 +1284,10 @@ class QlikGeoJSONExtractor {
         try {
           const sheetResult = await this.client.rpc(this.client.docHandle, "GetObject", [sheetId]);
           const sheetHandle = sheetResult?.qReturn?.qHandle;
-          if (typeof sheetHandle !== "number") {
-            throw coreError(ERROR_CODES.SHEET_GET_FAILED, "GetObject did not return a sheet handle.", { sheetId });
-          }
+          if (typeof sheetHandle !== "number") throw coreError(ERROR_CODES.SHEET_GET_FAILED, "GetObject did not return a sheet handle.", { sheetId });
           result.getSheet = "SUCCESS";
           const treeResult = await this.client.rpc(sheetHandle, "GetFullPropertyTree", []);
-          if (!treeResult?.qPropEntry) {
-            throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, "GetFullPropertyTree returned no qPropEntry.", { sheetId });
-          }
+          if (!treeResult?.qPropEntry) throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, "GetFullPropertyTree returned no qPropEntry.", { sheetId });
           result.getFullPropertyTree = "SUCCESS";
         } catch (error) {
           if (!result.getSheet) result.getSheet = "ERROR";
@@ -1028,38 +1307,37 @@ class QlikGeoJSONExtractor {
       const fields = await listAppFields(this.client);
       const summarizedFields = summarizeFields(fields);
       const sheet = await inspectSheet(this.client, sheetId);
-      const pointLayers = summarizePointLayers(sheet.pointLayers);
+      const pointLayers = summarizePointLayers(sheet.pointLayers, fields);
       const fieldByName = new Map(fields.map((field) => [field.qName, field]));
       const diagnostics = [];
       const entityKeySuggestions = [];
 
       for (const layer of pointLayers) {
-        let coordinateStats;
+        let spatialStats;
         try {
-          coordinateStats = await analyzeCoordinateFields(this.client, layer.latitudeDefinition, layer.longitudeDefinition);
+          spatialStats = await analyzeSpatialSource(this.client, layer.spatialSource);
         } catch (error) {
-          coordinateStats = { available: false, reason: "analysis-error", error: serializeError(error) };
+          spatialStats = { available: false, type: layer.spatialMode, reason: "analysis-error", error: serializeError(error) };
         }
 
-        const coordinateCardinality = coordinateStats?.distinctPairs ??
-          (Math.max(
-            fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? 0,
-            fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? 0
-          ) || null);
-        const visualDimensions = layer.visualDimensions.map((name) => ({
-          field: name,
-          cardinality: fieldByName.get(name)?.qCardinal ?? null
-        }));
-        const warnings = coordinateWarnings(layer, coordinateStats);
+        const sourceFieldNames = spatialSourceFields(layer.spatialSource);
+        const sourceCardinalities = sourceFieldNames.map((name) => fieldByName.get(name)?.qCardinal).filter(Number.isFinite);
+        const spatialCardinality = spatialStats?.distinctRepresentations ??
+          (sourceCardinalities.length === 1 ? sourceCardinalities[0] : null);
+        const visualDimensions = layer.visualDimensions.map((name) => ({ field: name, cardinality: fieldByName.get(name)?.qCardinal ?? null }));
+        const warnings = spatialWarnings(layer, spatialStats);
         for (const dim of visualDimensions) {
-          if (coordinateCardinality && dim.cardinality && dim.cardinality < coordinateCardinality) {
+          if (spatialCardinality && dim.cardinality && dim.cardinality < spatialCardinality) {
             warnings.push({
-              code: DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_CARDINALITY,
+              code: layer.spatialMode === "coordinates"
+                ? DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_CARDINALITY
+                : DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_SPATIAL_CARDINALITY,
               severity: "warning",
               params: {
                 field: dim.field,
                 dimensionCardinality: dim.cardinality,
-                coordinateCardinality
+                coordinateCardinality: spatialCardinality,
+                spatialCardinality
               }
             });
           }
@@ -1068,37 +1346,39 @@ class QlikGeoJSONExtractor {
         diagnostics.push({
           objectId: layer.objectId,
           layerId: layer.layerId,
-          latitudeField: layer.latitudeDefinition?.field,
-          longitudeField: layer.longitudeDefinition?.field,
+          spatialMode: layer.spatialMode,
+          spatialSource: layer.spatialSource,
+          spatialCardinality,
+          spatialStats,
+          latitudeField: layer.latitudeDefinition?.field ?? null,
+          longitudeField: layer.longitudeDefinition?.field ?? null,
+          locationField: layer.locationDefinition?.field ?? null,
           latitudeDefinition: layer.latitudeDefinition,
           longitudeDefinition: layer.longitudeDefinition,
-          latitudeCardinality: fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? coordinateStats?.latitude?.distinct ?? null,
-          longitudeCardinality: fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? coordinateStats?.longitude?.distinct ?? null,
-          coordinateCardinality,
-          coordinateStats,
+          locationDefinition: layer.locationDefinition,
+          latitudeCardinality: layer.spatialMode === "coordinates" ? fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? spatialStats?.latitude?.distinct ?? null : null,
+          longitudeCardinality: layer.spatialMode === "coordinates" ? fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? spatialStats?.longitude?.distinct ?? null : null,
+          locationCardinality: layer.spatialMode === "location" ? fieldByName.get(layer.locationDefinition?.field)?.qCardinal ?? spatialStats?.distinctLocations ?? null : null,
+          // Compatibility aliases for previous reports.
+          coordinateCardinality: layer.spatialMode === "coordinates" ? spatialCardinality : null,
+          coordinateStats: layer.spatialMode === "coordinates" ? spatialStats : null,
           visualDimensions,
           warnings
         });
 
         const pool = candidatePool(fields, {
-          coordinateCardinality,
-          latitudeField: layer.latitudeDefinition?.field,
-          longitudeField: layer.longitudeDefinition?.field,
+          spatialCardinality,
+          spatialFieldNames: sourceFieldNames,
           visualDimensions: layer.visualDimensions,
           limit: candidateAnalysisLimit
         });
         const spatialProfiles = {};
-        if (coordinateStats?.available) {
+        if (spatialStats?.available) {
           for (const fieldName of pool) {
             try {
-              spatialProfiles[fieldName] = await analyzeEntityCandidate(
-                this.client,
-                fieldName,
-                layer.latitudeDefinition,
-                layer.longitudeDefinition
-              );
+              spatialProfiles[fieldName] = await analyzeEntityCandidate(this.client, fieldName, layer.spatialSource);
             } catch (error) {
-              spatialProfiles[fieldName] = { available: false, reason: "analysis-error", error: serializeError(error) };
+              spatialProfiles[fieldName] = { available: false, type: layer.spatialMode, reason: "analysis-error", error: serializeError(error) };
             }
           }
         }
@@ -1106,10 +1386,10 @@ class QlikGeoJSONExtractor {
         entityKeySuggestions.push({
           objectId: layer.objectId,
           layerId: layer.layerId,
+          spatialMode: layer.spatialMode,
           candidates: suggestEntityKeys(fields, {
-            latitudeField: layer.latitudeDefinition?.field,
-            longitudeField: layer.longitudeDefinition?.field,
-            coordinateCardinality,
+            spatialCardinality,
+            spatialFieldNames: sourceFieldNames,
             visualDimensions: layer.visualDimensions,
             spatialProfiles
           })
@@ -1136,11 +1416,16 @@ class QlikGeoJSONExtractor {
     for (const key of required) {
       if (!config[key]) throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, `Missing extraction config: ${key}`, { key });
     }
-    if (!(config.latitudeField || config.latitudeExpression)) {
-      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: latitude", { key: "latitudeField|latitudeExpression" });
-    }
-    if (!(config.longitudeField || config.longitudeExpression)) {
-      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: longitude", { key: "longitudeField|longitudeExpression" });
+    const spatialMode = spatialModeFromConfig(config);
+    if (spatialMode === "coordinates") {
+      if (!(config.latitudeField || config.latitudeExpression)) {
+        throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: latitude", { key: "latitudeField|latitudeExpression" });
+      }
+      if (!(config.longitudeField || config.longitudeExpression)) {
+        throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: longitude", { key: "longitudeField|longitudeExpression" });
+      }
+    } else if (!(config.locationField || config.locationExpression)) {
+      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: location", { key: "locationField|locationExpression" });
     }
 
     try {
@@ -1154,7 +1439,7 @@ class QlikGeoJSONExtractor {
         const error = coreError(
           ERROR_CODES.MISSING_COORDINATES,
           `${converted.missing.length} entities have no valid coordinates.`,
-          { count: converted.missing.length },
+          { count: converted.missing.length, spatialMode },
           { missing: converted.missing }
         );
         throw error;
@@ -1190,6 +1475,7 @@ class QlikGeoJSONExtractor {
     QixClient,
     QlikGeoJSONExtractor,
     coordinateWarnings,
+    spatialWarnings,
     listAppFields,
     summarizeFields,
     suggestEntityKeys,
@@ -1200,12 +1486,16 @@ class QlikGeoJSONExtractor {
     walkPropertyTree,
     coordinateDefinition,
     analyzeCoordinateFields,
+    analyzeLocationField,
+    analyzeSpatialSource,
     analyzeEntityCandidate,
+    spatialSourceFields,
     buildPointCubeDefinition,
     createSessionCube,
     fetchAllStraightCubeRows,
     propertyExpression,
     normalizeMeasures,
+    spatialModeFromConfig,
     rowsToPointGeoJSON,
     validatePointGeoJSON,
     downloadJSON,
@@ -1221,6 +1511,9 @@ class QlikGeoJSONExtractor {
     uniquePropertyName,
     joinBasePath,
     deepClone,
-    resolveSimpleQlikFieldReference
+    resolveSimpleQlikFieldReference,
+    looksLikeQlikExpression,
+    extractQlikFieldReferences,
+    parseQlikPoint
   });
 })(globalThis);
