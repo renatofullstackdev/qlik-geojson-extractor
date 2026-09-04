@@ -4,8 +4,6 @@ Ferramenta **browser-first** para inspecionar `PointLayer`s do Qlik Sense, ident
 
 A interface recomendada para uso cotidiano é a extensão Chrome em `chrome-extension/`. O bundle de DevTools continua disponível para diagnóstico e desenvolvimento.
 
-> **Política de exemplos:** o único painel concreto documentado é o painel público **Locais de Votação do TRE-DF**. Testes de regressão usam dados sintéticos. Identificadores de painéis internos não devem ser registrados no repositório.
-
 ## Objetivo da versão 1.0
 
 A ferramenta faz uma coisa deliberadamente bem:
