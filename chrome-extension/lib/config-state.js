@@ -1,9 +1,14 @@
 export function normalizeSavedConfig(input = {}) {
+  const inferredSpatialMode = input.spatialMode === "location" || input.locationSelection || input.locationField || input.locationExpression
+    ? "location"
+    : "coordinates";
   return {
-    version: 2,
+    version: 3,
     layerIndex: Number.isInteger(input.layerIndex) ? input.layerIndex : 0,
+    spatialMode: inferredSpatialMode,
     latitudeSelection: input.latitudeSelection ?? (input.latitudeField ? `field:${encodeURIComponent(input.latitudeField)}` : ""),
     longitudeSelection: input.longitudeSelection ?? (input.longitudeField ? `field:${encodeURIComponent(input.longitudeField)}` : ""),
+    locationSelection: input.locationSelection ?? (input.locationField ? `field:${encodeURIComponent(input.locationField)}` : input.locationExpression ? `expression:${encodeURIComponent(input.locationExpression)}` : ""),
     entityKey: String(input.entityKey ?? ""),
     properties: Array.isArray(input.properties) ? input.properties.map((item) => ({ field: String(item.field ?? ""), aggregation: String(item.aggregation ?? "only") })).filter((item) => item.field) : [],
     customProperties: Array.isArray(input.customProperties) ? input.customProperties.map((item) => ({ label: String(item.label ?? ""), expression: String(item.expression ?? "") })) : [],

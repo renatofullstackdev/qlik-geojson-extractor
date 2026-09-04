@@ -4,6 +4,7 @@ import {
   buildDiagnosticReport,
   buildPropertyDefinitions,
   coordinateFieldGroups,
+  locationFieldGroups,
   decodeCoordinateSelection,
   encodeCoordinateSelection,
   extractionHealth,
@@ -16,7 +17,7 @@ import { confidenceLabel, localizeCoreError, localizeDiagnostic, localizeEvidenc
 const ids = [
   "connectionBadge", "detectButton", "pageMessage", "hostAccessBadge", "hostAccessButton", "advancedModeInput",
   "appIdInput", "sheetIdInput", "virtualProxyInput", "probeButton", "inspectButton", "probeOutput",
-  "inspectionSection", "layerSelect", "latitudeInput", "longitudeInput", "layerDiagnostic", "entityKeySelect", "entityKeyAssessment",
+  "inspectionSection", "layerSelect", "coordinatesInputs", "latitudeInput", "longitudeInput", "locationInputs", "locationInput", "layerDiagnostic", "entityKeySelect", "entityKeyAssessment",
   "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "selectFilteredButton", "selectRelatedButton",
   "clearPropertiesButton", "bulkAggregationSelect", "applyBulkAggregationButton", "bulkWarning",
   "customPropertiesSection", "addCustomPropertyButton", "customPropertyList", "measuresSection", "addMeasureButton", "measureList",
@@ -306,25 +307,71 @@ function renderCoordinateSelect(select, definition, label) {
   }
   select.value = detectedValue || "";
 }
+function appendLocationFieldGroup(select, label, fields, seen) {
+  if (!fields.length) return;
+  const group = document.createElement("optgroup"); group.label = label;
+  for (const field of fields) {
+    if (!field?.name || seen.has(field.name)) continue; seen.add(field.name);
+    const option = document.createElement("option"); option.value = `field:${encodeURIComponent(field.name)}`;
+    const tags = field.tags?.filter((tag) => tag.startsWith("$geo")).join(", ");
+    option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}${tags ? ` · ${tags}` : ""}`;
+    group.append(option);
+  }
+  if (group.children.length) select.append(group);
+}
+function renderLocationSelect(select, definition) {
+  select.textContent = "";
+  const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Escolha a localização..."; select.append(placeholder);
+  const detectedValue = encodeCoordinateSelection(definition);
+  if (detectedValue) {
+    const group = document.createElement("optgroup"); group.label = "Detectado no PointLayer";
+    const option = document.createElement("option"); option.value = detectedValue;
+    option.textContent = definition.kind === "field" ? `${definition.field} · campo direto` : `${definition.raw} · expressão Qlik`;
+    group.append(option); select.append(group);
+  }
+  const groups = locationFieldGroups(inspectionReport?.fields ?? [], definition?.field ?? "", definition?.referencedFields ?? []);
+  const seen = new Set();
+  if (groups.detected) seen.add(groups.detected.name);
+  appendLocationFieldGroup(select, "Campos referenciados pela expressão", groups.referenced, seen);
+  appendLocationFieldGroup(select, "Campos geoespaciais", groups.geo, seen);
+  appendLocationFieldGroup(select, "Todos os campos", groups.other, seen);
+  select.value = detectedValue || "";
+}
 function applyLayer(index) {
   const layer = inspectionReport?.pointLayers?.[index]; if (!layer) return;
-  renderCoordinateSelect(els.latitudeInput, layer.latitudeDefinition, "Latitude");
-  renderCoordinateSelect(els.longitudeInput, layer.longitudeDefinition, "Longitude");
+  const locationMode = layer.spatialMode === "location" || layer.isLatLong === false;
+  setVisible(els.coordinatesInputs, !locationMode);
+  setVisible(els.locationInputs, locationMode);
+  if (locationMode) {
+    renderLocationSelect(els.locationInput, layer.locationDefinition);
+    els.latitudeInput.textContent = ""; els.longitudeInput.textContent = "";
+  } else {
+    renderCoordinateSelect(els.latitudeInput, layer.latitudeDefinition, "Latitude");
+    renderCoordinateSelect(els.longitudeInput, layer.longitudeDefinition, "Longitude");
+    els.locationInput.textContent = "";
+  }
   renderDiagnostic(index); renderEntityOptions(index); renderFieldList(); updateEffectiveConfigPreview(); updateReadiness();
 }
 function renderDiagnostic(index) {
   const diagnostic = layerDiagnostic(index); const layer = inspectionReport.pointLayers[index]; els.layerDiagnostic.textContent = "";
-  const rows = [
+  const locationMode = (diagnostic?.spatialMode ?? layer.spatialMode) === "location";
+  const rows = locationMode ? [
+    ["Modo espacial", "Localização única"],
+    ["Localização", diagnostic?.locationDefinition?.field ?? diagnostic?.locationDefinition?.raw ?? layer.locationOrLatitude ?? "?"],
+    ["Dimensão visual", (diagnostic?.visualDimensions ?? []).map((d) => `${d.field} (${d.cardinality ?? "?"})`).join(", ") || "não identificada"],
+    ["Localizações distintas", diagnostic?.spatialStats?.distinctRepresentations ?? diagnostic?.spatialCardinality ?? "?"]
+  ] : [
+    ["Modo espacial", "Latitude/longitude"],
     ["Latitude", diagnostic?.latitudeDefinition?.field ?? diagnostic?.latitudeDefinition?.raw ?? layer.locationOrLatitude ?? "?"],
     ["Longitude", diagnostic?.longitudeDefinition?.field ?? diagnostic?.longitudeDefinition?.raw ?? layer.longitude ?? "?"],
     ["Dimensão visual", (diagnostic?.visualDimensions ?? []).map((d) => `${d.field} (${d.cardinality ?? "?"})`).join(", ") || "não identificada"],
-    ["Pares distintos", diagnostic?.coordinateStats?.distinctPairs ?? diagnostic?.coordinateCardinality ?? "?"]
+    ["Pares distintos", diagnostic?.spatialStats?.distinctPairs ?? diagnostic?.spatialCardinality ?? "?"]
   ];
   for (const [label, value] of rows) {
     const row = document.createElement("div"); row.className = "diagnostic-row"; const left = document.createElement("span"); left.textContent = label; const right = document.createElement("strong"); right.textContent = String(value); row.append(left, right); els.layerDiagnostic.append(row);
   }
-  const stats = diagnostic?.coordinateStats;
-  if (stats?.available) {
+  const stats = diagnostic?.spatialStats;
+  if (!locationMode && stats?.available) {
     const grid = document.createElement("div"); grid.className = "diagnostic-stats";
     for (const [name, value] of [
       ["Latitude mín./máx.", `${stats.latitude.min ?? "?"} / ${stats.latitude.max ?? "?"}`],
@@ -382,7 +429,7 @@ function renderFieldList() {
 }
 function updateSelectedPropertyCount(){els.selectedPropertyCount.textContent=`${selectedProperties.size} selecionada${selectedProperties.size===1?"":"s"}`;els.bulkWarning.textContent=selectedProperties.size>100?"Muitos campos selecionados podem gerar um hypercube pesado e incluir dados desnecessários.":"";}
 function selectFiltered(){const fields=visibleFields();if(fields.length>100&&!confirm(`Selecionar ${fields.length} campos filtrados pode gerar uma consulta grande. Continuar?`))return;for(const field of fields)if(!selectedProperties.has(field.name))selectedProperties.set(field.name,"only");renderFieldList();updateEffectiveConfigPreview();}
-function selectRelated(){const lat=decodeCoordinateSelection(els.latitudeInput.value).field;const lon=decodeCoordinateSelection(els.longitudeInput.value).field;const fields=relatedFields(inspectionReport?.fields??[],els.entityKeySelect.value,lat,lon);for(const field of fields)if(!selectedProperties.has(field.name))selectedProperties.set(field.name,"only");renderFieldList();updateEffectiveConfigPreview();showToast(`${fields.length} campo(s) relacionado(s) selecionado(s).`);}
+function selectRelated(){const layer=inspectionReport?.pointLayers?.[selectedLayerIndex()];const spatialFields=layer?.spatialMode==="location"?[decodeCoordinateSelection(els.locationInput.value).field,...(layer.locationDefinition?.referencedFields??[])]:[decodeCoordinateSelection(els.latitudeInput.value).field,decodeCoordinateSelection(els.longitudeInput.value).field];const fields=relatedFields(inspectionReport?.fields??[],els.entityKeySelect.value,...spatialFields);for(const field of fields)if(!selectedProperties.has(field.name))selectedProperties.set(field.name,"only");renderFieldList();updateEffectiveConfigPreview();showToast(`${fields.length} campo(s) relacionado(s) selecionado(s).`);}
 function clearProperties(){selectedProperties.clear();renderFieldList();updateEffectiveConfigPreview();}
 function applyBulk(){selectedProperties=applyBulkAggregation(selectedProperties,els.bulkAggregationSelect.value);renderFieldList();updateEffectiveConfigPreview();showToast("Agregação aplicada aos campos selecionados.");}
 
@@ -394,25 +441,32 @@ function renderMeasures(){els.measureList.textContent="";for(const measure of me
 function parseOverrides(){const text=els.coordinateOverridesInput.value.trim();if(!text)return undefined;try{const parsed=JSON.parse(text);if(!parsed||Array.isArray(parsed)||typeof parsed!=="object")throw new Error();return parsed;}catch(error){throw uiError("O JSON de correções de coordenadas é inválido.", error.message);}}
 function buildExtractionConfig(){
   const {appId}=requiredIds();const entityKey=els.entityKeySelect.value;if(!entityKey)throw uiError("Escolha explicitamente a chave da entidade física.");
-  const lat=decodeCoordinateSelection(els.latitudeInput.value);const lon=decodeCoordinateSelection(els.longitudeInput.value);if(!(lat.field||lat.expression))throw uiError("Escolha a latitude.");if(!(lon.field||lon.expression))throw uiError("Escolha a longitude.");
+  const layer=inspectionReport?.pointLayers?.[selectedLayerIndex()];const spatialMode=layer?.spatialMode==="location"?"location":"coordinates";
   const validMeasures=measures.map(({label,expression})=>({label:label.trim(),expression:expression.trim()})).filter((x)=>x.label||x.expression);for(const m of validMeasures)if(!m.label||!m.expression)throw uiError("Toda medida deve possuir rótulo e expressão Qlik.");
-  const config={appId,name:els.datasetNameInput.value.trim()||"qlik_points",entityKey,properties:buildPropertyDefinitions([...selectedProperties.entries()],customProperties),measures:validMeasures,navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim()||"coordinate_source",coordinateSourceValue:els.coordinateSourceValueInput.value.trim()||"Qlik",coordinateOverrides:parseOverrides()};
-  if(lat.field)config.latitudeField=lat.field;else config.latitudeExpression=lat.expression;if(lon.field)config.longitudeField=lon.field;else config.longitudeExpression=lon.expression;return config;
+  const config={appId,name:els.datasetNameInput.value.trim()||"qlik_points",entityKey,spatialMode,properties:buildPropertyDefinitions([...selectedProperties.entries()],customProperties),measures:validMeasures,navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim()||"coordinate_source",coordinateSourceValue:els.coordinateSourceValueInput.value.trim()||"Qlik",coordinateOverrides:parseOverrides()};
+  if(spatialMode==="location"){
+    const location=decodeCoordinateSelection(els.locationInput.value);if(!(location.field||location.expression))throw uiError("Escolha a localização.");
+    if(location.field)config.locationField=location.field;else config.locationExpression=location.expression;
+  }else{
+    const lat=decodeCoordinateSelection(els.latitudeInput.value);const lon=decodeCoordinateSelection(els.longitudeInput.value);if(!(lat.field||lat.expression))throw uiError("Escolha a latitude.");if(!(lon.field||lon.expression))throw uiError("Escolha a longitude.");
+    if(lat.field)config.latitudeField=lat.field;else config.latitudeExpression=lat.expression;if(lon.field)config.longitudeField=lon.field;else config.longitudeExpression=lon.expression;
+  }
+  return config;
 }
 function updateEffectiveConfigPreview(){if(!els.effectiveConfigOutput)return;try{if(!inspectionReport){els.effectiveConfigOutput.textContent="Inspecione a sheet para montar a configuração.";return;}els.effectiveConfigOutput.textContent=pretty(buildExtractionConfig());}catch(error){els.effectiveConfigOutput.textContent=`Configuração incompleta: ${friendlyError(error)}`;}updateReadiness();}
-function updateReadiness(){if(!els.readinessPanel)return;els.readinessPanel.textContent="";const items=[];const diag=layerDiagnostic(selectedLayerIndex());const warnings=diag?.warnings??[];items.push({state:inspectionReport?"ok":"warn",text:inspectionReport?"PointLayer inspecionado.":"Inspecione a sheet."});items.push({state:(els.latitudeInput.value&&els.longitudeInput.value)?"ok":"warn",text:(els.latitudeInput.value&&els.longitudeInput.value)?"Latitude e longitude definidas.":"Defina latitude e longitude."});items.push({state:els.entityKeySelect.value?"ok":"warn",text:els.entityKeySelect.value?`Chave física: ${els.entityKeySelect.value}.`:"Escolha a chave da entidade física."});if(warnings.some((w)=>w.severity==="error"))items.push({state:"error",text:"Há erro no diagnóstico das coordenadas."});else if(warnings.length)items.push({state:"warn",text:`${warnings.length} aviso(s) no diagnóstico do mapa.`});else if(inspectionReport)items.push({state:"ok",text:"Sem avisos estruturais no PointLayer."});for(const item of items){const div=document.createElement("div");div.className=`readiness-item ${item.state}`;div.textContent=item.text;els.readinessPanel.append(div);}}
+function updateReadiness(){if(!els.readinessPanel)return;els.readinessPanel.textContent="";const items=[];const layer=inspectionReport?.pointLayers?.[selectedLayerIndex()];const diag=layerDiagnostic(selectedLayerIndex());const warnings=diag?.warnings??[];const locationMode=layer?.spatialMode==="location";items.push({state:inspectionReport?"ok":"warn",text:inspectionReport?"PointLayer inspecionado.":"Inspecione a sheet."});const spatialReady=locationMode?Boolean(els.locationInput.value):Boolean(els.latitudeInput.value&&els.longitudeInput.value);items.push({state:spatialReady?"ok":"warn",text:spatialReady?(locationMode?"Fonte de localização definida.":"Latitude e longitude definidas."):(locationMode?"Defina a fonte de localização.":"Defina latitude e longitude.")});items.push({state:els.entityKeySelect.value?"ok":"warn",text:els.entityKeySelect.value?`Chave física: ${els.entityKeySelect.value}.`:"Escolha a chave da entidade física."});if(warnings.some((w)=>w.severity==="error"))items.push({state:"error",text:"Há erro no diagnóstico da fonte espacial."});else if(warnings.length)items.push({state:"warn",text:`${warnings.length} aviso(s) no diagnóstico do mapa.`});else if(inspectionReport)items.push({state:"ok",text:"Sem avisos estruturais no PointLayer."});for(const item of items){const div=document.createElement("div");div.className=`readiness-item ${item.state}`;div.textContent=item.text;els.readinessPanel.append(div);}}
 
 async function extract(){setBusy(els.extractButton,true,"Extraindo...");els.extractStatus.textContent="Criando hypercube e buscando todas as linhas...";currentResult=null;currentDiagnosticReport=null;setVisible(els.downloadButton,false);setVisible(els.downloadDiagnosticButton,false);resetResultPanels();try{const config=buildExtractionConfig();if(els.effectiveConfigOutput)els.effectiveConfigOutput.textContent=pretty(config);currentResult=await runQlik("extract",config);renderResult(currentResult);const health=extractionHealth(currentResult);els.extractStatus.textContent=health.message;els.extractStatus.dataset.state=health.level;setVisible(els.downloadButton,health.allowDownload);currentDiagnosticReport=buildDiagnosticReport({inspectionReport,layerIndex:selectedLayerIndex(),config,result:currentResult});setVisible(els.downloadDiagnosticButton,true);showToast(health.message,health.level==="success"?"success":"error");}catch(error){els.extractStatus.textContent=friendlyError(error);els.extractStatus.dataset.state="error";if(Array.isArray(error.missing)&&error.missing.length){els.missingOutput.textContent=pretty(error.missing);setVisible(els.missingDetails,true);}showToast(friendlyError(error),"error");}finally{setBusy(els.extractButton,false);}}
 function resetResultPanels(){for(const el of [els.resultSummary,els.missingDetails,els.skippedDetails,els.previewDetails])setVisible(el,false);els.resultSummary.textContent="";els.missingOutput.textContent="";els.skippedOutput.textContent="";els.previewOutput.textContent="";}
-function renderResult(result){const summary=[[result.rowCount??0,"linhas Qlik"],[result.featureCount??0,"feições"],[result.uniqueKeys??0,"chaves únicas"],[result.missing?.length??0,"sem coordenadas"],[result.skippedNullEntityCount??0,"linhas nulas ignoradas"],[result.appliedOverrides?.length??0,"correções aplicadas"]];els.resultSummary.textContent="";for(const [value,label] of summary){const item=document.createElement("div");item.className="summary-item";const strong=document.createElement("strong");strong.textContent=String(value);const span=document.createElement("span");span.textContent=label;item.append(strong,span);els.resultSummary.append(item);}setVisible(els.resultSummary,true);if(result.missing?.length){els.missingOutput.textContent=pretty(result.missing);setVisible(els.missingDetails,true);}if(result.skippedNullEntities?.length){els.skippedOutput.textContent=pretty(result.skippedNullEntities);setVisible(els.skippedDetails,true);}els.previewOutput.textContent=pretty(result.featureCollection?.features?.slice(0,10)??[]);setVisible(els.previewDetails,true);}
+function renderResult(result){const summary=[[result.rowCount??0,"linhas Qlik"],[result.featureCount??0,"feições"],[result.uniqueKeys??0,"chaves únicas"],[result.missing?.length??0,"sem geometria"],[result.skippedNullEntityCount??0,"linhas nulas ignoradas"],[result.appliedOverrides?.length??0,"correções aplicadas"]];els.resultSummary.textContent="";for(const [value,label] of summary){const item=document.createElement("div");item.className="summary-item";const strong=document.createElement("strong");strong.textContent=String(value);const span=document.createElement("span");span.textContent=label;item.append(strong,span);els.resultSummary.append(item);}setVisible(els.resultSummary,true);if(result.missing?.length){els.missingOutput.textContent=pretty(result.missing);setVisible(els.missingDetails,true);}if(result.skippedNullEntities?.length){els.skippedOutput.textContent=pretty(result.skippedNullEntities);setVisible(els.skippedDetails,true);}els.previewOutput.textContent=pretty(result.featureCollection?.features?.slice(0,10)??[]);setVisible(els.previewDetails,true);}
 async function downloadJsonData(data,filename,mime){const blob=new Blob([pretty(data)],{type:mime});const url=URL.createObjectURL(blob);try{await chrome.downloads.download({url,filename,saveAs:true});}finally{setTimeout(()=>URL.revokeObjectURL(url),30000);}}
 async function downloadResult(){if(!currentResult?.featureCollection){showToast("Gere o GeoJSON antes de baixar.","error");return;}const base=safeFilename(els.datasetNameInput.value,"qlik_points");await downloadJsonData(currentResult.featureCollection,base.toLowerCase().endsWith(".geojson")?base:`${base}.geojson`,"application/geo+json;charset=utf-8");showToast("Download do GeoJSON iniciado.");}
 async function downloadDiagnostic(){if(!currentDiagnosticReport){showToast("Execute uma extração para gerar o relatório de diagnóstico.","error");return;}const base=safeFilename(els.datasetNameInput.value,"qlik_points");await downloadJsonData(currentDiagnosticReport,`${base}_diagnostico.json`,"application/json;charset=utf-8");showToast("Download do relatório de diagnóstico iniciado.");}
 
 async function currentStorageIdentity(){const granted=await getGrantedTabContext();const parsed=parseQlikSenseUrl(pageContext?.url??granted.url);return{origin:parsed.origin??pageContext?.origin,appId:els.appIdInput.value.trim(),sheetId:els.sheetIdInput.value.trim()};}
-function serializableUiConfig(){return normalizeSavedConfig({layerIndex:selectedLayerIndex(),latitudeSelection:els.latitudeInput.value,longitudeSelection:els.longitudeInput.value,entityKey:els.entityKeySelect.value,properties:[...selectedProperties.entries()].map(([field,aggregation])=>({field,aggregation})),customProperties:customProperties.map(({label,expression})=>({label,expression})),measures:measures.map(({label,expression})=>({label,expression})),datasetName:els.datasetNameInput.value.trim(),navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim(),coordinateSourceValue:els.coordinateSourceValueInput.value.trim(),coordinateOverrides:els.coordinateOverridesInput.value.trim(),virtualProxyPath:normalizedVirtualProxy(),advancedMode:els.advancedModeInput.checked});}
+function serializableUiConfig(){return normalizeSavedConfig({layerIndex:selectedLayerIndex(),spatialMode:inspectionReport?.pointLayers?.[selectedLayerIndex()]?.spatialMode??"coordinates",latitudeSelection:els.latitudeInput.value,longitudeSelection:els.longitudeInput.value,locationSelection:els.locationInput.value,entityKey:els.entityKeySelect.value,properties:[...selectedProperties.entries()].map(([field,aggregation])=>({field,aggregation})),customProperties:customProperties.map(({label,expression})=>({label,expression})),measures:measures.map(({label,expression})=>({label,expression})),datasetName:els.datasetNameInput.value.trim(),navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim(),coordinateSourceValue:els.coordinateSourceValueInput.value.trim(),coordinateOverrides:els.coordinateOverridesInput.value.trim(),virtualProxyPath:normalizedVirtualProxy(),advancedMode:els.advancedModeInput.checked});}
 async function saveConfig(){if(!inspectionReport){showToast("Inspecione a sheet antes de salvar a configuração.","error");return;}const key=configStorageKey(await currentStorageIdentity());if(!key){showToast("Não foi possível identificar app/sheet para salvar.","error");return;}await chrome.storage.local.set({[key]:serializableUiConfig()});showToast("Configuração salva localmente no Chrome.");}
-async function loadConfig(){if(!inspectionReport){showToast("Inspecione a sheet antes de carregar a configuração.","error");return;}const key=configStorageKey(await currentStorageIdentity());if(!key)return;const raw=(await chrome.storage.local.get(key))[key];if(!raw){showToast("Nenhuma configuração salva para este app/sheet.","error");return;}const stored=normalizeSavedConfig(raw);const layerIndex=inspectionReport.pointLayers[stored.layerIndex]?stored.layerIndex:0;els.layerSelect.value=String(layerIndex);applyLayer(layerIndex);if([...els.latitudeInput.options].some((o)=>o.value===stored.latitudeSelection))els.latitudeInput.value=stored.latitudeSelection;if([...els.longitudeInput.options].some((o)=>o.value===stored.longitudeSelection))els.longitudeInput.value=stored.longitudeSelection;renderEntityOptions(layerIndex,stored.entityKey);selectedProperties=new Map(stored.properties.filter((item)=>inspectionReport.fields.some((f)=>f.name===item.field)).map((item)=>[item.field,item.aggregation]));customProperties=stored.customProperties.map((item)=>({id:crypto.randomUUID(),...item}));measures=stored.measures.map((item)=>({id:crypto.randomUUID(),...item}));els.datasetNameInput.value=stored.datasetName;els.navigationLinksInput.checked=stored.navigationLinks;els.requireAllCoordinatesInput.checked=stored.requireAllCoordinates;els.skipNullEntitiesInput.checked=stored.skipNullEntities;els.coordinateSourceFieldInput.value=stored.coordinateSourceField;els.coordinateSourceValueInput.value=stored.coordinateSourceValue;els.coordinateOverridesInput.value=stored.coordinateOverrides;els.virtualProxyInput.value=stored.virtualProxyPath;setAdvancedMode(stored.advancedMode);renderFieldList();renderCustomProperties();renderMeasures();renderEntityAssessment();updateEffectiveConfigPreview();showToast("Configuração carregada.");}
+async function loadConfig(){if(!inspectionReport){showToast("Inspecione a sheet antes de carregar a configuração.","error");return;}const key=configStorageKey(await currentStorageIdentity());if(!key)return;const raw=(await chrome.storage.local.get(key))[key];if(!raw){showToast("Nenhuma configuração salva para este app/sheet.","error");return;}const stored=normalizeSavedConfig(raw);const layerIndex=inspectionReport.pointLayers[stored.layerIndex]?stored.layerIndex:0;els.layerSelect.value=String(layerIndex);applyLayer(layerIndex);if([...els.latitudeInput.options].some((o)=>o.value===stored.latitudeSelection))els.latitudeInput.value=stored.latitudeSelection;if([...els.longitudeInput.options].some((o)=>o.value===stored.longitudeSelection))els.longitudeInput.value=stored.longitudeSelection;if([...els.locationInput.options].some((o)=>o.value===stored.locationSelection))els.locationInput.value=stored.locationSelection;renderEntityOptions(layerIndex,stored.entityKey);selectedProperties=new Map(stored.properties.filter((item)=>inspectionReport.fields.some((f)=>f.name===item.field)).map((item)=>[item.field,item.aggregation]));customProperties=stored.customProperties.map((item)=>({id:crypto.randomUUID(),...item}));measures=stored.measures.map((item)=>({id:crypto.randomUUID(),...item}));els.datasetNameInput.value=stored.datasetName;els.navigationLinksInput.checked=stored.navigationLinks;els.requireAllCoordinatesInput.checked=stored.requireAllCoordinates;els.skipNullEntitiesInput.checked=stored.skipNullEntities;els.coordinateSourceFieldInput.value=stored.coordinateSourceField;els.coordinateSourceValueInput.value=stored.coordinateSourceValue;els.coordinateOverridesInput.value=stored.coordinateOverrides;els.virtualProxyInput.value=stored.virtualProxyPath;setAdvancedMode(stored.advancedMode);renderFieldList();renderCustomProperties();renderMeasures();renderEntityAssessment();updateEffectiveConfigPreview();showToast("Configuração carregada.");}
 async function clearConfig(){const key=configStorageKey(await currentStorageIdentity());if(!key)return;await chrome.storage.local.remove(key);showToast("Configuração salva removida.");await refreshSavedConfigAvailability();}
 async function refreshSavedConfigAvailability(){try{const key=configStorageKey(await currentStorageIdentity());const exists=key?Boolean((await chrome.storage.local.get(key))[key]):false;els.loadConfigButton.disabled=!exists;els.clearConfigButton.disabled=!exists;}catch{els.loadConfigButton.disabled=true;els.clearConfigButton.disabled=true;}}
 
@@ -421,7 +475,7 @@ els.detectButton.addEventListener("click",()=>void detectContext());
 els.probeButton.addEventListener("click",()=>void probe());
 els.inspectButton.addEventListener("click",()=>void inspect());
 els.layerSelect.addEventListener("change",()=>applyLayer(selectedLayerIndex()));
-els.latitudeInput.addEventListener("change",updateEffectiveConfigPreview);els.longitudeInput.addEventListener("change",updateEffectiveConfigPreview);
+els.latitudeInput.addEventListener("change",updateEffectiveConfigPreview);els.longitudeInput.addEventListener("change",updateEffectiveConfigPreview);els.locationInput.addEventListener("change",updateEffectiveConfigPreview);
 els.entityKeySelect.addEventListener("change",()=>{renderEntityAssessment();renderFieldList();updateEffectiveConfigPreview();updateReadiness();});
 els.fieldSearchInput.addEventListener("input",renderFieldList);
 els.selectFilteredButton.addEventListener("click",selectFiltered);els.selectRelatedButton.addEventListener("click",selectRelated);els.clearPropertiesButton.addEventListener("click",clearProperties);els.applyBulkAggregationButton.addEventListener("click",applyBulk);

@@ -61,13 +61,19 @@
         <select id="layerSelect"></select>
       </label>
 
-      <div class="grid two">
+      <div id="coordinatesInputs" class="grid two">
         <label>Latitude
           <select id="latitudeInput"></select>
         </label>
         <label>Longitude
           <select id="longitudeInput"></select>
         </label>
+      </div>
+      <div id="locationInputs" class="hidden">
+        <label>Localização
+          <select id="locationInput"></select>
+        </label>
+        <p class="hint">Neste PointLayer o Qlik usa uma única fonte de localização. Para gerar GeoJSON sem geocodificação externa, a fonte precisa resultar no formato nativo de ponto do Qlik: <code>[longitude, latitude]</code>.</p>
       </div>
       <p class="hint">A configuração do próprio PointLayer é priorizada. Campos simples são validados; expressões Qlik são preservadas sem tentar adivinhar um campo equivalente.</p>
 
@@ -140,7 +146,7 @@
       <div class="advanced-only">
         <label class="check-line">
           <input id="requireAllCoordinatesInput" type="checkbox" checked>
-          <span>Falhar se uma entidade real estiver sem coordenadas</span>
+          <span>Falhar se uma entidade real estiver sem geometria Point válida</span>
         </label>
         <label class="check-line">
           <input id="skipNullEntitiesInput" type="checkbox" checked>
@@ -182,7 +188,7 @@
       <div id="extractStatus" class="status-line"></div>
       <div id="resultSummary" class="summary-grid hidden"></div>
       <details id="missingDetails" class="hidden">
-        <summary>Entidades sem coordenadas</summary>
+        <summary>Entidades sem geometria Point válida</summary>
         <pre id="missingOutput" class="output"></pre>
       </details>
       <details id="skippedDetails" class="hidden">
