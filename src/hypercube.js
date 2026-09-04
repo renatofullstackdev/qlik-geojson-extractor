@@ -1,6 +1,7 @@
 import { qlikFieldRef } from "./utils.js";
+import { coreError, ERROR_CODES } from "./errors.js";
 
-function propertyExpression(definition) {
+export function propertyExpression(definition) {
   if (typeof definition === "string") {
     return { field: definition, label: definition, expression: `Only(${qlikFieldRef(definition)})` };
   }
@@ -15,23 +16,45 @@ function propertyExpression(definition) {
     case "max": return { field, label, expression: `Max(${qlikFieldRef(field)})` };
     case "min": return { field, label, expression: `Min(${qlikFieldRef(field)})` };
     case "maxTimestamp": return { field, label, expression: `Timestamp(Max(${qlikFieldRef(field)}), '${definition.format ?? "YYYY-MM-DD hh:mm:ss"}')` };
-    default: throw new Error(`Unsupported property aggregation: ${definition.aggregation}`);
+    default:
+      throw coreError(
+        ERROR_CODES.UNSUPPORTED_PROPERTY_AGGREGATION,
+        `Unsupported property aggregation: ${definition.aggregation}`,
+        { aggregation: definition.aggregation, field }
+      );
   }
 }
 
-function normalizeMeasures(measures = []) {
+export function normalizeMeasures(measures = []) {
   if (!Array.isArray(measures)) {
     return Object.entries(measures).map(([label, expression]) => ({ label, expression }));
   }
   return measures.map((m) => typeof m === "string" ? { label: m, expression: m } : m);
 }
 
+function coordinateExpression(config, axis) {
+  const expression = config[`${axis}Expression`];
+  if (expression) return String(expression).replace(/^=/, "").trim();
+  const field = config[`${axis}Field`];
+  return field ? `Only(${qlikFieldRef(field)})` : null;
+}
+
 export function buildPointCubeDefinition(config) {
   const propertyDefs = (config.properties ?? []).map(propertyExpression);
+  const latitudeExpression = coordinateExpression(config, "latitude");
+  const longitudeExpression = coordinateExpression(config, "longitude");
+  if (!latitudeExpression || !longitudeExpression) {
+    throw coreError(
+      ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+      "Latitude/longitude extraction definitions are missing.",
+      { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
+    );
+  }
+
   const attributeExpressions = [
     ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` })),
-    { qExpression: `Only(${qlikFieldRef(config.latitudeField)})`, qLabel: config.latitudeField, qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
-    { qExpression: `Only(${qlikFieldRef(config.longitudeField)})`, qLabel: config.longitudeField, qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
+    { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
+    { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
   ];
   const measures = normalizeMeasures(config.measures);
 
@@ -54,17 +77,20 @@ export function buildPointCubeDefinition(config) {
       }
     },
     propertyDefs,
-    measures
+    measures,
+    coordinateExpressions: { latitude: latitudeExpression, longitude: longitudeExpression }
   };
 }
 
 export async function createSessionCube(client, definition) {
   const result = await client.rpc(client.docHandle, "CreateSessionObject", [definition]);
   const handle = result?.qReturn?.qHandle;
-  if (typeof handle !== "number") throw new Error("CreateSessionObject did not return a valid handle.");
+  if (typeof handle !== "number") {
+    throw coreError(ERROR_CODES.SESSION_OBJECT_INVALID_HANDLE, "CreateSessionObject did not return a valid handle.");
+  }
   const layoutResult = await client.rpc(handle, "GetLayout", []);
   const hyperCube = layoutResult?.qLayout?.qHyperCube;
-  if (!hyperCube) throw new Error("GetLayout did not return qHyperCube.");
+  if (!hyperCube) throw coreError(ERROR_CODES.HYPERCUBE_LAYOUT_MISSING, "GetLayout did not return qHyperCube.");
   return { handle, hyperCube };
 }
 

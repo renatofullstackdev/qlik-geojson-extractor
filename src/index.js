@@ -1,8 +1,11 @@
 export { QixClient } from "./qix-client.js";
-export { QlikGeoJSONExtractor } from "./extractor.js";
-export { listAppFields, summarizeFields, suggestEntityKeys } from "./app-inspector.js";
-export { inspectSheet, summarizePointLayers, walkPropertyTree } from "./map-inspector.js";
-export { buildPointCubeDefinition, createSessionCube, fetchAllStraightCubeRows } from "./hypercube.js";
+export { QlikGeoJSONExtractor, coordinateWarnings } from "./extractor.js";
+export { listAppFields, summarizeFields, suggestEntityKeys, candidatePool, scoreEntityCandidate } from "./app-inspector.js";
+export { inspectSheet, summarizePointLayers, walkPropertyTree, coordinateDefinition } from "./map-inspector.js";
+export { analyzeCoordinateFields, analyzeEntityCandidate } from "./spatial-analysis.js";
+export { buildPointCubeDefinition, createSessionCube, fetchAllStraightCubeRows, propertyExpression, normalizeMeasures } from "./hypercube.js";
 export { rowsToPointGeoJSON, validatePointGeoJSON } from "./geojson.js";
 export { downloadJSON, downloadGeoJSON } from "./download.js";
+export { ERROR_CODES, DIAGNOSTIC_CODES, EVIDENCE_CODES } from "./codes.js";
+export { QlikGeoJSONError, coreError, serializeError } from "./errors.js";
 export * from "./utils.js";
