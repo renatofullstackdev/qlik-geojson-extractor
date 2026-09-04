@@ -1,131 +1,67 @@
-# Chrome extension
+# Qlik GeoJSON Extractor — extensão Chrome
 
-A extensão Manifest V3 fornece uma interface Side Panel para o núcleo `qlik-geojson-extractor`.
+Extensão Manifest V3 com Side Panel para o núcleo `qlik-geojson-extractor`.
 
-## Instalação local
+## Uso
 
-Na raiz do projeto:
+1. abra uma sheet Qlik em que você já esteja autenticado;
+2. clique no ícone da extensão;
+3. conceda acesso ao host Qlik atual;
+4. teste a conexão;
+5. inspecione o PointLayer;
+6. valide latitude/longitude;
+7. escolha explicitamente a chave da entidade física;
+8. selecione propriedades;
+9. gere e valide o GeoJSON;
+10. baixe o GeoJSON e, se necessário, o relatório de diagnóstico.
 
-```bash
-npm run build
-```
+## Modo básico
 
-Depois, no Chrome/Chromium:
+O modo básico esconde opções que normalmente são detectadas ou têm defaults seguros. O proxy virtual, expressões personalizadas, medidas, proveniência e overrides ficam no **Modo avançado**.
 
-1. abra `chrome://extensions`;
-2. habilite **Modo do desenvolvedor**;
-3. clique em **Carregar sem compactação**;
-4. escolha a pasta `chrome-extension/`;
-5. abra uma sheet Qlik em que você já esteja autenticado;
-6. clique no ícone **Qlik GeoJSON Extractor**;
-7. no Side Panel, clique em **Permitir acesso a este site**;
-8. aceite a solicitação do Chrome para o host Qlik atual.
+## Proxy virtual
 
-O painel lateral detecta `appId`, `sheetId` e virtual proxy quando a URL segue o padrão Qlik Sense `/sense/app/.../sheet/...`.
-
-## Por que existe o botão de acesso ao host
-
-`chrome.scripting.executeScript()` exige permissão para a URL da página. O `activeTab` é útil para associar o clique do ícone à guia corrente, mas o Side Panel continua executando comandos depois desse gesto inicial. Para tornar esse fluxo confiável, a extensão usa uma permissão de host opcional e explícita.
-
-O manifesto declara apenas a possibilidade de solicitar hosts HTTP/HTTPS:
-
-```json
-"optional_host_permissions": [
-  "https://*/*",
-  "http://*/*"
-]
-```
-
-Isso **não concede acesso automático a todos os sites**. Quando o usuário clica em **Permitir acesso a este site**, a extensão chama `chrome.permissions.request()` apenas para o hostname da página Qlik corrente, por exemplo:
+É o prefixo de caminho configurado no Qlik Proxy Service antes de `/sense/app/`. Exemplo:
 
 ```text
-https://paineis.tre-df.jus.br/*
+https://example.test/finance/sense/app/APP/sheet/SHEET
+                         ^^^^^^^^
+                         /finance
 ```
 
-O acesso pode ser removido pelo mesmo botão.
+Sem proxy virtual:
+
+```text
+https://example.test/sense/app/APP/sheet/SHEET
+```
+
+A extensão detecta esse valor automaticamente.
+
+## Coordenadas
+
+A configuração do próprio PointLayer é a primeira fonte de verdade. Referências simples são convertidas para campos; expressões complexas são preservadas. Para campos diretos, a extensão calcula estatísticas e pares distintos antes da extração.
+
+## Chave física
+
+Os candidatos são classificados por comportamento espacial e evidências auxiliares. Um `$key` do Qlik recebe peso pequeno: `$key` significa participação no modelo associativo, não necessariamente identidade geográfica.
+
+A evidência mais importante é quantos valores do candidato mapeiam para **exatamente um par de coordenadas**. Valores com múltiplos pares recebem forte penalidade.
+
+## Propriedades em lote
+
+A UI permite selecionar campos filtrados, selecionar campos relacionados às tabelas da entidade/coordenadas, limpar a seleção e aplicar uma agregação em lote.
 
 ## Permissões
 
-- `activeTab`: identifica a guia em que o usuário acionou explicitamente a extensão;
-- `scripting`: injeta o núcleo na página Qlik depois que o host foi autorizado;
-- `sidePanel`: hospeda a interface;
-- `storage`: persiste configurações por app/sheet e o contexto temporário da guia;
-- `downloads`: salva o GeoJSON gerado;
-- `optional_host_permissions`: permite solicitar, em tempo de execução, somente o host Qlik escolhido pelo usuário.
+- `activeTab`: associa o clique à guia corrente;
+- `scripting`: injeta o core após autorização;
+- `sidePanel`: interface lateral;
+- `storage`: configurações e contexto transitório;
+- `downloads`: downloads locais;
+- `optional_host_permissions`: torna possível pedir somente o host Qlik atual em runtime.
 
-A extensão não declara `host_permissions` nem `<all_urls>`. A declaração genérica em `optional_host_permissions` apenas torna possível pedir um host descoberto em tempo de execução; nenhum host é concedido na instalação.
+Não há `host_permissions` permanentes.
 
-## Fluxo
+## Distribuição
 
-```text
-abrir sheet Qlik
-  ↓
-clicar no ícone da extensão
-  ↓
-Permitir acesso a este site
-  ↓
-Testar conexão
-  ↓
-Inspecionar
-  ↓
-escolher PointLayer
-  ↓
-confirmar latitude/longitude
-  ↓
-escolher explicitamente entityKey
-  ↓
-selecionar propriedades/medidas
-  ↓
-Gerar GeoJSON
-  ↓
-validar resumo/preview
-  ↓
-Baixar GeoJSON
-```
-
-A dimensão visual nunca é promovida silenciosamente a `entityKey`.
-
-## Se a guia mudar de host
-
-A permissão é vinculada ao host. Se a guia navegar para outra origem, clique novamente no ícone da extensão nessa nova página e conceda o novo host. Navegações entre apps/sheets no mesmo host não precisam de nova concessão.
-
-## Coordenadas e configuração efetiva
-
-Latitude e longitude são escolhidas em listas de campos reais do app. O campo detectado no `PointLayer` aparece primeiro, mas a seleção permanece explícita. Isso evita que uma expressão textual ou um campo diferente seja enviado por engano como `latitudeField`/`longitudeField`.
-
-Antes de extrair, abra **Configuração efetiva que será enviada ao extrator** e confira pelo menos:
-
-```json
-{
-  "entityKey": "...",
-  "latitudeField": "...",
-  "longitudeField": "...",
-  "properties": []
-}
-```
-
-Se houver entidades reais, mas todas ficarem sem coordenadas, a extensão trata o resultado como erro operacional e não oferece download de um `FeatureCollection` vazio.
-
-## Expressões de propriedade
-
-Além da seleção direta de campos com `Only`, `Concat distinct`, `Max`, `Min` e `Max timestamp`, a extensão permite propriedades com expressão Qlik arbitrária:
-
-```text
-Rótulo: LABEL
-Expressão: Concat(Distinct [FIELD], ', ')
-```
-
-Isso corresponde à configuração programática:
-
-```js
-{
-  label: "LABEL",
-  expression: "Concat(Distinct [FIELD], ', ')"
-}
-```
-
-O valor de `coordinateSourceField` e `coordinateSourceValue` também pode ser configurado pela interface.
-
-## Núcleo determinístico
-
-Antes de cada comando Qlik, a extensão injeta novamente a cópia do bundle pertencente à própria extensão. Ela não reutiliza um `window.QlikGeoJSONExtractor` que possa ter sido colado anteriormente no DevTools. Isso torna o resultado independente do histórico da página.
+Para desenvolvimento, carregue `chrome-extension/` sem compactação. Para usuários finais, publique a extensão como **Unlisted** ou **Private** na Chrome Web Store, ou distribua via política corporativa. Veja `../docs/RELEASE.md`.

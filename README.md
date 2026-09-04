@@ -1,869 +1,235 @@
 # qlik-geojson-extractor
 
-Toolkit **browser-first** para inspecionar apps do Qlik Sense e extrair camadas de pontos com latitude/longitude para GeoJSON pela Qlik Engine (QIX) API.
+Ferramenta **browser-first** para inspecionar `PointLayer`s do Qlik Sense, identificar corretamente a entidade espacial e exportar GeoJSON pela Qlik Engine (QIX) API.
 
-O fluxo recomendado é usar o **DevTools do navegador na própria página Qlik**, onde você já possui autorização. Para extrair dados não é necessário instalar dependências npm.
+A interface recomendada para uso cotidiano é a extensão Chrome em `chrome-extension/`. O bundle de DevTools continua disponível para diagnóstico e desenvolvimento.
 
-> **Política dos exemplos deste projeto:** o único painel concreto usado nos exemplos é o painel público **Locais de Votação do TRE-DF**. Outros casos devem ser tratados com placeholders genéricos, sem registrar identificadores ou dados de painéis internos.
+> **Política de exemplos:** o único painel concreto documentado é o painel público **Locais de Votação do TRE-DF**. Testes de regressão usam dados sintéticos. Identificadores de painéis internos não devem ser registrados no repositório.
 
-## Interface recomendada: extensão do Chrome
+## Objetivo da versão 1.0
 
-O projeto também inclui uma extensão **Chrome Manifest V3** em `chrome-extension/`. Ela usa o mesmo núcleo de extração, mas substitui o fluxo manual do DevTools por um **Side Panel**.
+A ferramenta faz uma coisa deliberadamente bem:
 
-### Instalação local
+> inspeciona um `PointLayer`, ajuda o usuário a validar latitude/longitude e a escolher uma chave física adequada, e produz um GeoJSON `Point` auditável.
 
-Na raiz do projeto:
+Não há suporte 1.0 para `AreaLayer`, `LineLayer`, geocodificação textual ou planejamento de rotas.
 
-```bash
-npm run build
-```
+## Extensão Chrome — fluxo recomendado
 
-No Chrome/Chromium:
-
-1. abra `chrome://extensions`;
-2. habilite **Modo do desenvolvedor**;
-3. clique em **Carregar sem compactação**;
-4. selecione a pasta `chrome-extension/`;
-5. abra uma sheet Qlik em que você já esteja autenticado;
-6. clique no ícone **Qlik GeoJSON Extractor**.
-
-O painel lateral detecta `appId`, `sheetId` e virtual proxy a partir da guia em que o ícone foi acionado. Na primeira utilização de cada host Qlik, clique em **Permitir acesso a este site** e aceite a solicitação do Chrome. Depois siga:
+Depois de carregar/instalar a extensão:
 
 ```text
+abrir uma sheet Qlik já autenticada
+  ↓
+clicar no ícone Qlik GeoJSON Extractor
+  ↓
 Permitir acesso a este site
   ↓
 Testar conexão
   ↓
 Inspecionar
   ↓
-escolher PointLayer
+confirmar PointLayer e coordenadas
   ↓
-confirmar latitude/longitude
+revisar candidatos à chave física
   ↓
-escolher explicitamente a chave da entidade
+escolher explicitamente a chave
   ↓
-selecionar propriedades e expressões/medidas
-  ↓
-conferir a configuração efetiva
+selecionar propriedades
   ↓
 Gerar GeoJSON
   ↓
-validar resumo e preview
+revisar diagnóstico e contagens
   ↓
-Baixar GeoJSON
+Baixar GeoJSON / relatório de diagnóstico
 ```
 
-Na extensão, latitude e longitude são selecionadas entre campos reais retornados por `inspect()`, com o campo detectado no `PointLayer` priorizado. A interface também aceita propriedades com `label + expression` e mostra o JSON exato que será enviado a `extract()`. Se houver entidades reais mas nenhuma feição puder ser criada por falta de coordenadas, o resultado é tratado como erro e o download fica bloqueado.
+A extensão não escolhe `entityKey` silenciosamente.
 
-A extensão usa `activeTab` somente para associar o clique do ícone à guia correta e declara hosts HTTP/HTTPS apenas em `optional_host_permissions`. O acesso efetivo é solicitado em tempo de execução para o host Qlik corrente e só é concedido após confirmação do usuário. Ela não declara `<all_urls>` nem `host_permissions`, não envia dados a serviços externos e persiste somente configurações de extração. Consulte `docs/CHROME_EXTENSION.md`.
+### Modo básico e avançado
 
-O fluxo pelo DevTools continua disponível abaixo para diagnóstico avançado e desenvolvimento.
+O modo básico mostra apenas o necessário para a maioria das extrações. O **Modo avançado** expõe:
 
-## O que a ferramenta faz
+- proxy virtual;
+- expressões Qlik customizadas;
+- medidas;
+- política para coordenadas ausentes;
+- proveniência das coordenadas;
+- overrides manuais;
+- configuração efetiva enviada ao core.
 
-- obtém o token CSRF do Qlik;
-- abre uma sessão WebSocket isolada em `/identity/<uuid>`;
-- abre o app com `OpenDoc`;
-- testa acesso à sheet com `probe()`;
-- percorre a árvore de objetos da sheet;
-- encontra mapas e `PointLayer`s;
-- lista campos, cardinalidades, tags e tabelas de origem;
-- resolve referências simples a campos como `=LATITUDE` e `=[ENTITY NAME]`;
-- preserva também a referência bruta encontrada no objeto Qlik;
-- sugere possíveis chaves de entidade, sem escolher uma silenciosamente;
-- cria um hypercube próprio a partir de uma chave explicitamente escolhida;
-- pagina todas as linhas do hypercube;
-- reconhece `qIsNull` e ignora por padrão linhas cuja própria dimensão seja nula;
-- separa entidades nulas de entidades reais sem coordenadas;
-- gera e valida GeoJSON `Point`;
-- pode adicionar links de Google Maps e Waze;
-- suporta correções explícitas de coordenadas com proveniência e guarda de identidade.
+## Proxy virtual do Qlik
 
-## Regra mais importante
-
-**A dimensão visual do mapa não é necessariamente a chave física da entidade espacial.**
-
-No painel público do TRE-DF, o mapa é apresentado por `NOM_LOCAL`. Esse campo tem nomes repetidos e agregava locais físicos diferentes. A extração final precisou usar `COD_OBJETO_LOCAL` como `entityKey`.
-
-Por isso, use sempre este fluxo:
+O Qlik Sense pode publicar uma aplicação diretamente:
 
 ```text
-probe
-  ↓
-inspect
-  ↓
-confirmar latitude/longitude
-  ↓
-confirmar a entidade física e sua chave
-  ↓
-extract mínimo
-  ↓
-validar contagens e coordenadas
-  ↓
-adicionar propriedades e medidas
-  ↓
-download
+https://servidor/sense/app/APP/sheet/SHEET/...
 ```
 
----
-
-# Início rápido pelo DevTools
-
-## 1. Abra a sheet do Qlik
-
-A URL normalmente contém:
+ou por um **proxy virtual**, isto é, um prefixo de caminho associado a outra configuração do Qlik Proxy Service:
 
 ```text
-.../sense/app/APP_ID/sheet/SHEET_ID/state/analysis
+https://servidor/finance/sense/app/APP/sheet/SHEET/...
 ```
 
-No exemplo público do TRE-DF:
+Nesse exemplo, o proxy virtual é:
 
 ```text
-https://paineis.tre-df.jus.br/sense/app/b92de30a-82aa-4d13-8286-cd423498e34e/sheet/BAPbmZA/state/analysis
+/finance
 ```
 
-Portanto:
+Na maior parte dos ambientes o valor é vazio. A extensão detecta o prefixo pela URL; por isso o campo fica oculto no modo básico e não possui placeholder que sugira um valor arbitrário.
 
-```js
-var appId = "b92de30a-82aa-4d13-8286-cd423498e34e";
-var sheetId = "BAPbmZA";
+## Estratégia de latitude/longitude
+
+A prioridade é a própria configuração do `PointLayer`:
+
+1. se o layer referencia um campo simples, por exemplo `=LATITUDE` ou `=[Latitude]`, o campo é normalizado e usado como candidato de alta confiança;
+2. se o layer usa uma expressão Qlik complexa, por exemplo `=Avg([Latitude])`, a expressão é **preservada**, e não convertida artificialmente em nome de campo;
+3. quando são campos diretos, `inspect()` calcula estatísticas do Qlik: mínimo, máximo, cardinalidades e número de pares distintos;
+4. valores fora dos limites WGS84 geram diagnóstico estruturado;
+5. se uma troca lat/lon corrigiria um intervalo inválido, a ferramenta emite aviso de possível inversão;
+6. o usuário sempre pode escolher explicitamente outro campo.
+
+A ferramenta não tenta inferir inversão quando ambos os conjuntos de valores são matematicamente válidos; isso exigiria contexto geográfico adicional.
+
+## Estratégia de chave física
+
+A heurística 1.0 não depende apenas de `$key`, nomes `ID/COD` ou cardinalidade. Para os candidatos mais promissores, a ferramenta mede a relação real com as coordenadas.
+
+Evidências positivas:
+
+- até **+40**: proporção de valores que mapeiam para exatamente um par de coordenadas;
+- **+20**: mesma tabela-fonte de latitude/longitude;
+- até **+15**: cardinalidade próxima da cardinalidade espacial;
+- **+10**: campo usado como dimensão visual do mapa;
+- **+5**: tag Qlik `$key`;
+- **+5**: nome semelhante a identificador (`ID`, `COD`, `CHAVE`);
+- **+5**: nome semelhante a entidade espacial (`LOCAL`, `OBJETO`, `CIRCUNSCRICAO` etc.).
+
+Penalidades:
+
+- até **−50**: valores do candidato associados a múltiplos pares de coordenadas;
+- até **−30**: valores sem coordenadas.
+
+A UI mostra **confiança alta/média/baixa**, a pontuação e as evidências. O score é explicativo; não autoriza seleção automática.
+
+### Por que isso importa — TRE-DF
+
+No painel público do TRE-DF, a dimensão visual `NOM_LOCAL` possui menos valores distintos que as coordenadas porque nomes repetidos agregam locais físicos diferentes. O resultado final precisou usar `COD_OBJETO_LOCAL` como chave física.
+
+Esse caso motivou o teste espacial `candidato → pares de coordenadas`, que é mais relevante do que simplesmente confiar em `$key`.
+
+## Propriedades
+
+A seção de propriedades oferece:
+
+- busca por nome do campo e tabela-fonte;
+- **Selecionar filtrados**;
+- **Selecionar relacionados**, usando tabelas-fonte compartilhadas com entidade/coordenadas;
+- **Limpar seleção**;
+- aplicação em lote de `Only`, `Concat distinct`, `Max`, `Min` ou `Max timestamp`;
+- aviso quando muitos campos são selecionados.
+
+No modo avançado também é possível informar propriedades customizadas com `label + expression` e medidas Qlik.
+
+## Diagnóstico e idioma
+
+O core não entrega mais warnings textuais em inglês para a UI. Erros, diagnósticos e evidências usam **códigos estruturados + parâmetros**. A extensão possui um catálogo pt-BR completo e testado.
+
+A mensagem principal exibida ao usuário é localizada. Mensagens técnicas originais podem ser preservadas apenas para diagnóstico.
+
+O relatório JSON de diagnóstico registra, sem armazenar o dataset extraído:
+
+- PointLayer selecionado;
+- definição de latitude/longitude;
+- estatísticas das coordenadas;
+- warnings estruturados;
+- chave física escolhida e sua avaliação;
+- contagens da extração;
+- validação GeoJSON.
+
+## Instalação
+
+### Desenvolvimento
+
+```bash
+npm run build
+npm test
+npm run check
 ```
 
-## 2. Abra o Console
-
-No Chrome/Chromium:
+Depois:
 
 ```text
-F12 → Console
+chrome://extensions
+→ Modo do desenvolvedor
+→ Carregar sem compactação
+→ selecionar chrome-extension/
 ```
 
-Se o navegador bloquear colagem, siga a instrução exibida pelo próprio DevTools para habilitá-la.
+### Usuário final
 
-## 3. Cole o bundle
+`chrome://extensions` é apenas o fluxo de desenvolvimento. Para distribuição real, prefira:
 
-Abra no projeto:
+1. **Chrome Web Store — Unlisted**: instalação por link, sem aparecer na busca pública;
+2. **Chrome Web Store — Private** ou política corporativa, se o navegador do órgão for gerenciado;
+3. instalação forçada por política Chrome Enterprise, quando a administração central quiser disponibilizar a extensão sem ação do usuário.
 
-```text
-browser/qlik-geojson-extractor.js
-```
+Consulte `docs/RELEASE.md`.
 
-Copie **todo o arquivo** e cole no Console.
+## Permissões e privacidade
 
-O Console pode responder apenas:
+A extensão:
 
-```text
-undefined
-```
+- usa `activeTab` para associar o clique à guia;
+- solicita acesso ao host Qlik corrente apenas em runtime;
+- não possui `host_permissions` permanentes;
+- não envia dados para servidor externo;
+- armazena apenas configurações por app/sheet;
+- mantém GeoJSON e valores extraídos somente em memória até o download.
 
-Isso é normal: é o retorno da execução do bundle, não um erro.
+Veja `chrome-extension/PRIVACY.md`.
 
-Confirme que a API foi carregada:
+## DevTools
 
-```js
-globalThis.QlikGeoJSONExtractor
-```
-
-## 4. Crie uma instância
-
-Use exatamente:
+Para depuração avançada, cole `browser/qlik-geojson-extractor.js` no console da própria página Qlik:
 
 ```js
 var Extractor = globalThis.QlikGeoJSONExtractor.QlikGeoJSONExtractor;
-var downloadGeoJSON = globalThis.QlikGeoJSONExtractor.downloadGeoJSON;
 var extractor = new Extractor();
-```
 
-Não use:
-
-```js
-new QlikGeoJSONExtractor()
-```
-
-O nome `globalThis.QlikGeoJSONExtractor` é um **namespace**; a classe `QlikGeoJSONExtractor` está dentro dele.
-
-Os exemplos usam `var` para facilitar a repetição dos comandos no Console sem erro de redeclaração.
-
----
-
-# Etapa A — testar a conexão
-
-No painel público do TRE-DF:
-
-```js
-var appId = "b92de30a-82aa-4d13-8286-cd423498e34e";
-var sheetId = "BAPbmZA";
-
-await extractor.probe({ appId, sheetId })
-```
-
-Resultado esperado:
-
-```js
-{
-  websocket: "OPEN",
-  openDoc: "SUCCESS",
-  getSheet: "SUCCESS",
-  getFullPropertyTree: "SUCCESS",
-  identity: "qlik-geojson-..."
-}
-```
-
-Não é necessário usar `console.log(await ...)`. O próprio DevTools exibirá o objeto retornado.
-
-Se os quatro estados forem de sucesso, a ferramenta conseguiu abrir o app e ler a árvore da sheet.
-
-### Erros vermelhos que podem ser independentes
-
-Extensões do navegador, bloqueadores, scripts opcionais do Qlik e APIs de storage podem produzir erros no Console sem afetar o extrator. O teste confiável é o objeto retornado por `probe()`.
-
----
-
-# Etapa B — inspecionar antes de extrair
-
-Execute:
-
-```js
-var report = await extractor.inspect({ appId, sheetId });
-report
-```
-
-## 1. Ver os `PointLayer`s
-
-```js
-report.pointLayers
-```
-
-No TRE-DF, procure a camada com:
-
-```text
-objectId: pvpGAE
-layerId:  jmVahf
-```
-
-Ela usa latitude/longitude e foi observada com:
-
-```text
-latitude:         NUM_LATITUDE_LOCAL
-longitude:        NUM_LONGITUDE_LOCAL
-dimensão visual:  NOM_LOCAL
-```
-
-O `inspect()` agora resolve automaticamente formas simples de referência a campo:
-
-```text
-FIELD             → FIELD
-=FIELD            → FIELD
-[FIELD WITH SPACE]  → FIELD WITH SPACE
-=[FIELD WITH SPACE] → FIELD WITH SPACE
-```
-
-As formas originais continuam disponíveis nos campos `*Raw` do relatório.
-
-Expressões complexas, por exemplo:
-
-```text
-=Only([FIELD])
-=If(...)
-=Sum(...)
-```
-
-**não são interpretadas como nomes de campo**. Nesses casos o diagnóstico pode manter cardinalidade `null`, porque a ferramenta prefere não adivinhar a semântica da expressão.
-
-## 2. Ver cardinalidades e alertas
-
-```js
-report.diagnostics
-```
-
-No caso TRE-DF, a investigação mostrou a diferença relevante entre a dimensão visual e a entidade física:
-
-```text
-NOM_LOCAL             568 valores distintos
-COD_OBJETO_LOCAL      614 valores distintos
-NUM_LATITUDE_LOCAL    613 valores distintos
-NUM_LONGITUDE_LOCAL   613 valores distintos
-```
-
-Esse é precisamente o tipo de situação em que não se deve usar automaticamente a dimensão visual como chave da geometria.
-
-## 3. Ver sugestões de chave
-
-```js
-report.entityKeySuggestions
-```
-
-As sugestões são **candidatos**, não uma decisão automática. O score considera, entre outras coisas:
-
-- tag `$key`;
-- nome parecido com identificador;
-- proximidade entre a cardinalidade do candidato e a cardinalidade das coordenadas.
-
-Confirme sempre a semântica do campo antes de usá-lo como `entityKey`.
-
-## 4. Consultar os campos relevantes
-
-No TRE-DF:
-
-```js
-report.fields.filter(f =>
-  /COD_OBJETO_LOCAL|NOM_LOCAL|NUM_LATITUDE_LOCAL|NUM_LONGITUDE_LOCAL/.test(f.name)
-)
-```
-
-Ou um campo específico:
-
-```js
-report.fields.find(f => f.name === "COD_OBJETO_LOCAL")
-```
-
-Cada item informa, entre outros:
-
-```text
-name
-cardinality
-tags
-sourceTables
-```
-
----
-
-# Etapa C — fazer uma extração mínima
-
-Antes de adicionar todos os atributos, teste apenas a entidade física e as coordenadas.
-
-No TRE-DF:
-
-```js
-var minimalConfig = {
-  appId,
-  name: "tre_df_locais_votacao_minimo",
-  entityKey: "COD_OBJETO_LOCAL",
-  latitudeField: "NUM_LATITUDE_LOCAL",
-  longitudeField: "NUM_LONGITUDE_LOCAL",
-  navigationLinks: false,
-  requireAllCoordinates: false
-};
-
-var minimal = await extractor.extract(minimalConfig);
-```
-
-Resuma:
-
-```js
-({
-  rows: minimal.rowCount,
-  features: minimal.featureCount,
-  uniqueKeys: minimal.uniqueKeys,
-  skippedNullEntities: minimal.skippedNullEntityCount,
-  missingCoordinates: minimal.missing.length,
-  validGeoJSON: minimal.validation.valid
-})
-```
-
-Na extração que originou o exemplo deste projeto, havia 614 locais físicos e uma entidade sem coordenada no conjunto original. Por isso a configuração mínima usa `requireAllCoordinates: false` para permitir a inspeção de `minimal.missing`.
-
-Veja os registros realmente sem coordenada:
-
-```js
-minimal.missing
-```
-
-Veja linhas cuja **própria dimensão** era nula no Qlik:
-
-```js
-minimal.skippedNullEntities
-```
-
-Esses dois casos são diferentes.
-
----
-
-# Entidades nulas versus coordenadas ausentes
-
-A versão atual distingue explicitamente:
-
-```text
-skippedNullEntities
-  = a dimensão da linha veio com qIsNull: true
-
-missing
-  = há uma entidade real identificável, mas o par lat/lon não é válido
-```
-
-Por padrão:
-
-```js
-skipNullEntities: true
-```
-
-Quando uma célula QIX possui `qIsNull: true`, ela é ignorada e registrada em:
-
-```js
-result.skippedNullEntities
-result.skippedNullEntityCount
-```
-
-Isso vale mesmo quando o Qlik usa um texto de apresentação para representar o nulo.
-
-Se você quiser transformar uma dimensão nula em erro:
-
-```js
-skipNullEntities: false
-```
-
-`requireAllCoordinates: true` continua tratando como erro **entidades reais** sem coordenadas.
-
----
-
-# Diagnosticar `Only()` retornando nulo
-
-O extrator calcula as coordenadas de cada entidade com a lógica equivalente a:
-
-```text
-Only([LATITUDE_FIELD])
-Only([LONGITUDE_FIELD])
-```
-
-Se uma `entityKey` estiver associada a vários valores distintos, `Only()` retorna nulo.
-
-Para investigar um caso, faça temporariamente:
-
-```js
-var debugConfig = {
-  ...minimalConfig,
-  properties: [
-    {
-      field: "NUM_LATITUDE_LOCAL",
-      label: "latitudes_distintas",
-      aggregation: "concat"
-    },
-    {
-      field: "NUM_LONGITUDE_LOCAL",
-      label: "longitudes_distintas",
-      aggregation: "concat"
-    }
-  ],
-  requireAllCoordinates: false
-};
-
-var debug = await extractor.extract(debugConfig);
-debug.missing
-```
-
-Se uma entidade possuir vários valores concatenados, a chave escolhida está agregando mais de uma posição espacial.
-
----
-
-# Etapa D — configuração completa do TRE-DF
-
-Depois da validação mínima, use a configuração completa.
-
-```js
-var treDfConfig = {
-  appId: "b92de30a-82aa-4d13-8286-cd423498e34e",
-  name: "locais_votacao_tre_df",
-
-  entityKey: "COD_OBJETO_LOCAL",
-  latitudeField: "NUM_LATITUDE_LOCAL",
-  longitudeField: "NUM_LONGITUDE_LOCAL",
-
-  properties: [
-    "NOM_LOCAL",
-    "NUM_LOCAL",
-    "NUM_ZONA",
-    "COD_OBJETO_ZONA",
-    "NOM_BAIRRO_LOCAL",
-    "DES_ENDERECO_LOCAL",
-    {
-      field: "DAT_ATUALIZACAO",
-      label: "DAT_ATUALIZACAO",
-      aggregation: "maxTimestamp"
-    }
-  ],
-
-  measures: [
-    {
-      label: "QT_ELEITORES",
-      expression: "Count(COD_OBJETO_ELEITOR)"
-    },
-    {
-      label: "QT_ELEITORES_APTOS",
-      expression: "Count({<COD_SIT_ELEITOR = {\"0\", \"9\"}>} COD_OBJETO_ELEITOR)"
-    },
-    {
-      label: "QT_ELEITORES_NAO_APTOS",
-      expression: "Count({<COD_SIT_ELEITOR -= {\"0\", \"9\"}>} COD_OBJETO_ELEITOR)"
-    },
-    {
-      label: "QT_SECOES",
-      expression: "Count(Distinct COD_OBJETO_SECAO)"
-    }
-  ],
-
-  navigationLinks: true,
-
-  coordinateSourceField: "coordenada_origem",
-  coordinateSourceValue: "TRE-DF/Qlik",
-
-  coordinateOverrides: {
-    "gjgh23121812463300": {
-      latitude: -15.83328021,
-      longitude: -48.13200421,
-      source: "manual",
-      expected: {
-        field: "NOM_LOCAL",
-        value: "ESCOLA CLASSE JUSCELINO KUBITSCHEK"
-      }
-    }
-  },
-
-  requireAllCoordinates: true
-};
-```
-
-Execute:
-
-```js
-var result = await extractor.extract(treDfConfig);
-```
-
-Confira antes de baixar:
-
-```js
-({
-  rows: result.rowCount,
-  features: result.featureCount,
-  uniqueKeys: result.uniqueKeys,
-  skippedNullEntities: result.skippedNullEntityCount,
-  missingCoordinates: result.missing.length,
-  manualOverrides: result.appliedOverrides.length,
-  validGeoJSON: result.validation.valid
-})
-```
-
-Para o conjunto usado na construção do exemplo, o resultado final esperado é:
-
-```js
-{
-  rows: 614,
-  features: 614,
-  uniqueKeys: 614,
-  skippedNullEntities: 0,
-  missingCoordinates: 0,
-  manualOverrides: 1,
-  validGeoJSON: true
-}
-```
-
-A correção manual está registrada explicitamente e protegida por uma verificação do nome esperado. Ela não é aplicada silenciosamente a outra entidade.
-
----
-
-# Etapa E — validar as feições
-
-Veja algumas feições:
-
-```js
-result.featureCollection.features.slice(0, 5)
-```
-
-Tabela de conferência:
-
-```js
-console.table(
-  result.featureCollection.features.map(f => ({
-    codigo: f.properties.COD_OBJETO_LOCAL,
-    local: f.properties.NOM_LOCAL,
-    zona: f.properties.NUM_ZONA,
-    latitude: f.properties.latitude,
-    longitude: f.properties.longitude,
-    origem: f.properties.coordenada_origem
-  }))
-)
-```
-
-Confira pelo menos:
-
-- quantidade de linhas e feições;
-- unicidade da `entityKey`;
-- `missing` vazio na extração final;
-- coordenadas plausíveis;
-- quantidade esperada de overrides;
-- valores dos principais atributos.
-
----
-
-# Etapa F — baixar o GeoJSON
-
-Depois da conferência:
-
-```js
-downloadGeoJSON(
-  "tre_df_locais_votacao_final.geojson",
-  result.featureCollection
-);
-```
-
----
-
-# Propriedades e agregações
-
-Toda propriedade configurada é avaliada sob a dimensão `entityKey`.
-
-Uma string simples:
-
-```js
-"NOM_LOCAL"
-```
-
-é equivalente a:
-
-```text
-Only([NOM_LOCAL])
-```
-
-Agregações embutidas:
-
-```text
-only
-concat
-max
-min
-maxTimestamp
-```
-
-Exemplo usando apenas campos do painel público TRE-DF:
-
-```js
-properties: [
-  "NOM_LOCAL",
-  { field: "NOM_BAIRRO_LOCAL", aggregation: "only" },
-  { field: "DAT_ATUALIZACAO", aggregation: "maxTimestamp" }
-]
-```
-
-Também é possível fornecer uma expressão Qlik explicitamente:
-
-```js
-{
-  label: "NOM_LOCAL_MAIUSCULO",
-  expression: "Upper(Only([NOM_LOCAL]))"
-}
-```
-
----
-
-# Medidas
-
-Medidas recebem expressões Qlik fornecidas explicitamente.
-
-No TRE-DF:
-
-```js
-measures: [
-  {
-    label: "QT_ELEITORES",
-    expression: "Count(COD_OBJETO_ELEITOR)"
-  },
-  {
-    label: "QT_SECOES",
-    expression: "Count(Distinct COD_OBJETO_SECAO)"
-  }
-]
-```
-
-Use medidas somente quando a agregação fizer sentido para a entidade física escolhida.
-
----
-
-# Google Maps e Waze
-
-Com:
-
-```js
-navigationLinks: true
-```
-
-a feature recebe, por padrão:
-
-```text
-google_maps
-waze
-```
-
-Os links apontam para as coordenadas da própria feature.
-
----
-
-# Correções manuais de coordenadas
-
-Use `coordinateOverrides` somente quando houver uma correção conhecida e documentada.
-
-O exemplo concreto está na configuração TRE-DF acima. A estrutura geral é:
-
-```js
-coordinateOverrides: {
-  "ENTITY_KEY_VALUE": {
-    latitude: -15.0,
-    longitude: -48.0,
-    source: "manual",
-    expected: {
-      field: "FIELD_INCLUDED_IN_PROPERTIES",
-      value: "EXPECTED VALUE"
-    }
-  }
-}
-```
-
-O campo usado em `expected.field` precisa estar incluído em `properties`.
-
----
-
-# Virtual proxy
-
-Se a instalação Qlik estiver sob um virtual proxy, instancie o extrator com o respectivo caminho:
-
-```js
-var Extractor = globalThis.QlikGeoJSONExtractor.QlikGeoJSONExtractor;
-var extractor = new Extractor({
-  virtualProxyPath: "/VIRTUAL_PROXY"
+var report = await extractor.inspect({
+  appId: "APP_ID",
+  sheetId: "SHEET_ID"
 });
 ```
 
-Isso ajusta o endpoint de CSRF e a rota do WebSocket.
+O exemplo público completo está em `examples/tre-df-console-after-bundle.js` e `examples/tre-df-locais-votacao.config.js`.
 
----
+## Testes
 
-# Diagnóstico rápido
+A suíte 1.0 prioriza comportamento, não contagem artificial de testes. Ela cobre:
 
-## O Console mostra `undefined` após colar o bundle
+- CSRF, WebSocket e RPC concorrente;
+- erros QIX estruturados;
+- normalização de referências Qlik;
+- construção de hypercube;
+- paginação sem lacunas/duplicações;
+- tratamento de `qIsNull`;
+- overrides de coordenadas;
+- validação GeoJSON positiva e negativa;
+- `inspect()` com agregação visual e chave espacial 1:1;
+- `extract()` end-to-end com cliente QIX falso;
+- seleção/agrupamento de propriedades;
+- persistência de configuração;
+- permissões do manifesto;
+- cobertura completa do catálogo pt-BR de erros/diagnósticos/evidências.
 
-Normal. Confirme:
-
-```js
-globalThis.QlikGeoJSONExtractor
-```
-
-## `QlikGeoJSONExtractor is not a constructor`
-
-Use a classe dentro do namespace:
-
-```js
-var Extractor = globalThis.QlikGeoJSONExtractor.QlikGeoJSONExtractor;
-var extractor = new Extractor();
-```
-
-## `probe()` funciona, mas há outros erros vermelhos
-
-Se `probe()` retorna os quatro estados de sucesso, mensagens de extensões ou recursos opcionais podem ser independentes do extrator.
-
-## `latitudeCardinality: null`
-
-Veja os valores brutos:
-
-```js
-report.pointLayers
-```
-
-Referências diretas simples são resolvidas. Expressões Qlik complexas não são interpretadas como nomes de campo.
-
-## `N entities have no valid coordinates`
-
-Refaça temporariamente com:
-
-```js
-requireAllCoordinates: false
-```
-
-Depois inspecione:
-
-```js
-result.missing
-result.skippedNullEntities
-```
-
-## `rows` é maior que `features`
-
-Veja:
-
-```js
-({
-  rows: result.rowCount,
-  features: result.featureCount,
-  skippedNullEntities: result.skippedNullEntityCount,
-  missingCoordinates: result.missing.length
-})
-```
-
-As diferenças devem ser explicadas por entidades nulas ignoradas e/ou entidades reais sem coordenadas.
-
-## Nenhum `PointLayer` foi encontrado
-
-A sheet pode:
-
-- não conter um mapa;
-- usar outro tipo de layer;
-- usar geocodificação textual;
-- usar uma estrutura Qlik ainda não suportada.
-
----
-
-# Uso por módulos ES
-
-O caminho recomendado para investigação manual é o bundle no DevTools. Para integração em código:
-
-```js
-import {
-  QlikGeoJSONExtractor,
-  downloadGeoJSON
-} from "./src/index.js";
-
-const extractor = new QlikGeoJSONExtractor();
-```
-
-A configuração pública completa também está em:
-
-```text
-examples/tre-df-locais-votacao.config.js
-```
-
----
-
-# Testes e build
-
-Não há dependências npm de runtime.
-
-Requer Node.js 18 ou superior para testes/build:
+Execute:
 
 ```bash
 npm test
 npm run build
 npm run check
-```
-
-`npm run build` regenera:
-
-```text
-browser/qlik-geojson-extractor.js
-```
-
-O bundle é um artefato gerado; faça mudanças em `src/` e regenere-o, em vez de editá-lo manualmente.
-
----
-
-# Limitações deliberadas
-
-- o extrator implementa atualmente o fluxo de geometria `Point` por latitude/longitude;
-- não interpreta semanticamente expressões Qlik complexas para descobrir campos ocultos nelas;
-- sugestões de `entityKey` são heurísticas e exigem validação humana;
-- `Only()` retorna nulo quando a entidade escolhida possui múltiplos valores distintos para uma propriedade/coordenada;
-- uma correção manual de coordenada precisa ser explicitamente configurada;
-- mapas por geocodificação textual, polígonos, linhas e outros tipos de layer exigem suporte adicional.
-
-Veja também:
-
-```text
-docs/ARCHITECTURE.md
-docs/LIMITATIONS.md
 ```

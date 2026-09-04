@@ -1,31 +1,63 @@
-# Architecture
+# Arquitetura
 
-The project separates Qlik transport from semantic extraction.
+```text
+Qlik Sense page
+   │
+   │ CSRF + QIX WebSocket
+   ▼
+src/ core
+   │
+   ├── probe
+   ├── inspect
+   │     ├── property tree / PointLayer
+   │     ├── field inventory
+   │     ├── coordinate statistics
+   │     └── entity-key spatial profiles
+   └── extract
+         ├── session hypercube
+         ├── pagination
+         ├── GeoJSON conversion
+         └── validation
 
-1. `qix-client.js`: CSRF, WebSocket, JSON-RPC, `OpenDoc`.
-2. `app-inspector.js`: field list, cardinalities, source tables, key suggestions.
-3. `map-inspector.js`: sheet property tree, maps and PointLayers.
-4. `hypercube.js`: creates an independent session hypercube using a configured physical entity key.
-5. `geojson.js`: turns rows into Point features, applies explicit coordinate overrides and validates output.
-6. `extractor.js`: high-level `probe`, `inspect` and `extract` workflows.
+browser/qlik-geojson-extractor.js
+   │ generated bundle
+   ▼
+chrome-extension/core/qlik-geojson-extractor.js
+   │ injected in MAIN world
+   ▼
+Chrome Side Panel
+```
 
-## Why extraction does not blindly clone the map cube
+## Separação de responsabilidades
 
-A Qlik map's visual dimension is not necessarily the physical spatial entity. A map may group several physical records by a display name. `inspect()` therefore exposes field cardinalities and candidate keys, while `extract()` requires an explicit `entityKey`.
+- `src/`: lógica QIX/GeoJSON independente da UI;
+- `browser/`: bundle único para DevTools;
+- `chrome-extension/core/`: cópia gerada do bundle;
+- `chrome-extension/lib/`: lógica pura da UI, localização, configuração e URL;
+- `chrome-extension/sidepanel/`: DOM e interação;
+- `test/`: testes comportamentais com clientes QIX falsos.
 
-This design avoids the failure mode discovered in the TRE-DF case: 614 physical voting locations were grouped into 568 distinct `NOM_LOCAL` values.
+## Diagnósticos estruturados
 
-## Session isolation
+O core retorna códigos e parâmetros, não textos localizados. A extensão traduz em pt-BR. Isso evita vazamento de mensagens inglesas e permite manter detalhes técnicos separadamente.
 
-The client opens the app through an `/identity/<uuid>` WebSocket URL. This isolates extraction selections/session state from the visible Qlik sheet and avoids sharing the browser client's default app session.
+## Coordenadas
 
-## Security
+`PointLayer.locationOrLatitude` e `PointLayer.longitude` são classificados como:
 
-The generic extractor never enumerates record values unless the caller explicitly configures fields for extraction. `inspect()` lists only model field metadata/cardinalities/source tables.
+```text
+field       → referência simples a campo
+expression  → expressão Qlik complexa preservada
+unknown     → informação ausente
+```
 
+Para campos, o `inspect()` calcula mínimo, máximo, cardinalidades e pares distintos.
 
-## Chrome extension layer
+## Entity key
 
-The optional `chrome-extension/` directory provides a Manifest V3 Side Panel around the same browser bundle. It does not fork QIX behavior. `scripts/build-extension.mjs` copies the generated browser bundle into `chrome-extension/core/`, and the Side Panel injects that core into the active Qlik tab using `chrome.scripting` in the `MAIN` world.
+A sugestão ocorre em duas etapas:
 
-The extension uses `activeTab` to bind an explicit toolbar invocation to a tab, then requests the exact Qlik host through `optional_host_permissions` before injecting the core. It does not declare persistent `host_permissions`. Configuration may be persisted locally, but extracted GeoJSON is not written to extension storage. See `CHROME_EXTENSION.md`.
+1. pool barato por metadados/cardinalidade/tabela-fonte;
+2. análise QIX dos melhores candidatos, medindo zero/um/múltiplos pares de coordenadas por valor.
+
+Essa segunda etapa é a evidência principal.
