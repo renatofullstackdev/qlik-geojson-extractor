@@ -97,3 +97,20 @@ test("GeoJSON validator accepts valid point collection", () => {
   });
   assert.equal(result.valid, true);
 });
+
+
+test("GeoJSON validator reports invalid root, geometry and coordinates with structured codes", async () => {
+  const { ERROR_CODES } = await import("../src/codes.js");
+  const root = validatePointGeoJSON({ type: "NotCollection", features: [] });
+  assert.equal(root.errors[0].code, ERROR_CODES.GEOJSON_ROOT_INVALID);
+
+  const geometry = validatePointGeoJSON({ type: "FeatureCollection", features: [
+    { type: "Feature", geometry: { type: "LineString", coordinates: [] }, properties: {} }
+  ] });
+  assert.equal(geometry.errors[0].code, ERROR_CODES.GEOJSON_GEOMETRY_INVALID);
+
+  const coords = validatePointGeoJSON({ type: "FeatureCollection", features: [
+    { type: "Feature", geometry: { type: "Point", coordinates: [200, 100] }, properties: {} }
+  ] });
+  assert.equal(coords.errors[0].code, ERROR_CODES.GEOJSON_COORDINATES_INVALID);
+});
