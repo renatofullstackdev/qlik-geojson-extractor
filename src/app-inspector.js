@@ -35,24 +35,41 @@ export function summarizeFields(fields) {
   }));
 }
 
-function hasSharedSource(field, coordinateFields) {
+function hasSharedSource(field, spatialFields) {
   const sources = new Set(field.qSrcTables ?? []);
-  return coordinateFields.some((coordinate) => (coordinate?.qSrcTables ?? []).some((table) => sources.has(table)));
+  return spatialFields.some((spatial) => (spatial?.qSrcTables ?? []).some((table) => sources.has(table)));
+}
+
+function profileRatios(profile) {
+  if (!profile) return null;
+  return {
+    one: profile.oneRepresentationRatio ?? profile.onePairRatio ?? 0,
+    multiple: profile.multipleRepresentationRatio ?? profile.multiplePairRatio ?? 0,
+    missing: profile.missingRatio ?? 0,
+    oneCount: profile.oneRepresentation ?? profile.onePair ?? 0,
+    multipleCount: profile.multipleRepresentations ?? profile.multiplePairs ?? 0,
+    missingCount: profile.withoutSpatial ?? profile.withoutCoordinates ?? 0
+  };
 }
 
 function confidenceFromProfile(profile) {
   if (!profile?.available || !profile.entityCount) return "unknown";
-  if (profile.onePairRatio >= 0.98 && profile.multiplePairRatio === 0 && profile.missingRatio <= 0.02) return "high";
-  if (profile.onePairRatio >= 0.9 && profile.multiplePairRatio <= 0.05 && profile.missingRatio <= 0.1) return "medium";
+  const ratios = profileRatios(profile);
+  if (ratios.one >= 0.98 && ratios.multiple === 0 && ratios.missing <= 0.02) return "high";
+  if (ratios.one >= 0.9 && ratios.multiple <= 0.05 && ratios.missing <= 0.1) return "medium";
   return "low";
 }
 
 export function scoreEntityCandidate(field, {
+  spatialCardinality = null,
   coordinateCardinality = null,
   visualDimensions = [],
+  spatialFields = [],
   coordinateFields = [],
   spatialProfile = null
 } = {}) {
+  const targetCardinality = spatialCardinality ?? coordinateCardinality;
+  const effectiveSpatialFields = spatialFields.length ? spatialFields : coordinateFields;
   const name = normalizeName(field.qName);
   let score = 0;
   const evidence = [];
@@ -62,40 +79,41 @@ export function scoreEntityCandidate(field, {
   };
 
   if ((field.qTags ?? []).includes("$key")) add(EVIDENCE_CODES.TAG_KEY, 5);
-  if (/^(ID|COD|KEY|CHAVE)_/.test(name) || /_(ID|COD|KEY|CHAVE)$/.test(name)) {
+  if (/^(ID|COD|CODIGO|KEY|CHAVE)_/.test(name) || /_(ID|COD|CODIGO|KEY|CHAVE)$/.test(name)) {
     add(EVIDENCE_CODES.NAME_KEY_LIKE, 5);
   }
-  if (/(OBJETO|ENTIDADE|ENTITY|LOCAL|LOCATION|CIRCUNSCRICAO)/.test(name)) {
+  if (/(OBJETO|ENTIDADE|ENTITY|LOCAL|LOCATION|CIRCUNSCRICAO|UNIDADE)/.test(name)) {
     add(EVIDENCE_CODES.NAME_SPATIAL_ENTITY_LIKE, 5);
   }
   if (visualDimensions.includes(field.qName)) add(EVIDENCE_CODES.VISUAL_DIMENSION, 10);
-  if (hasSharedSource(field, coordinateFields)) add(EVIDENCE_CODES.SAME_SOURCE_TABLE, 20);
+  if (hasSharedSource(field, effectiveSpatialFields)) add(EVIDENCE_CODES.SAME_SOURCE_TABLE, 20);
 
-  if (coordinateCardinality && Number.isFinite(field.qCardinal)) {
-    const ratio = Math.abs(field.qCardinal - coordinateCardinality) / Math.max(1, coordinateCardinality);
+  if (targetCardinality && Number.isFinite(field.qCardinal)) {
+    const ratio = Math.abs(field.qCardinal - targetCardinality) / Math.max(1, targetCardinality);
     const weight = ratio <= 0.02 ? 15 : ratio <= 0.1 ? 10 : ratio <= 0.25 ? 5 : 0;
-    if (weight) add(EVIDENCE_CODES.CARDINALITY_CLOSE, weight, { coordinateCardinality, fieldCardinality: field.qCardinal });
+    if (weight) add(EVIDENCE_CODES.CARDINALITY_CLOSE, weight, { spatialCardinality: targetCardinality, coordinateCardinality: targetCardinality, fieldCardinality: field.qCardinal });
   }
 
   if (spatialProfile?.available && spatialProfile.entityCount) {
-    const onePairWeight = Math.round(40 * spatialProfile.onePairRatio);
-    if (onePairWeight) add(EVIDENCE_CODES.SPATIAL_ONE_PAIR_RATIO, onePairWeight, {
-      onePair: spatialProfile.onePair,
+    const ratios = profileRatios(spatialProfile);
+    const oneWeight = Math.round(40 * ratios.one);
+    if (oneWeight) add(EVIDENCE_CODES.SPATIAL_ONE_REPRESENTATION_RATIO, oneWeight, {
+      oneRepresentation: ratios.oneCount,
       entityCount: spatialProfile.entityCount,
-      ratio: spatialProfile.onePairRatio
+      ratio: ratios.one
     });
-    if (spatialProfile.multiplePairs) {
-      add(EVIDENCE_CODES.SPATIAL_MULTIPLE_PAIRS, -Math.max(10, Math.round(50 * spatialProfile.multiplePairRatio)), {
-        multiplePairs: spatialProfile.multiplePairs,
+    if (ratios.multipleCount) {
+      add(EVIDENCE_CODES.SPATIAL_MULTIPLE_REPRESENTATIONS, -Math.max(10, Math.round(50 * ratios.multiple)), {
+        multipleRepresentations: ratios.multipleCount,
         entityCount: spatialProfile.entityCount,
-        ratio: spatialProfile.multiplePairRatio
+        ratio: ratios.multiple
       });
     }
-    if (spatialProfile.withoutCoordinates) {
-      add(EVIDENCE_CODES.SPATIAL_MISSING_COORDINATES, -Math.max(5, Math.round(30 * spatialProfile.missingRatio)), {
-        withoutCoordinates: spatialProfile.withoutCoordinates,
+    if (ratios.missingCount) {
+      add(EVIDENCE_CODES.SPATIAL_MISSING_REPRESENTATION, -Math.max(5, Math.round(30 * ratios.missing)), {
+        withoutSpatial: ratios.missingCount,
         entityCount: spatialProfile.entityCount,
-        ratio: spatialProfile.missingRatio
+        ratio: ratios.missing
       });
     }
   }
@@ -111,25 +129,27 @@ export function scoreEntityCandidate(field, {
 }
 
 export function candidatePool(fields, {
+  spatialCardinality = null,
   coordinateCardinality = null,
+  spatialFieldNames = [],
   latitudeField,
   longitudeField,
   visualDimensions = [],
   limit = 8
 } = {}) {
-  const coordinateFields = [
-    fields.find((f) => f.qName === latitudeField),
-    fields.find((f) => f.qName === longitudeField)
-  ].filter(Boolean);
-  const maxCardinality = coordinateCardinality
-    ? Math.max(coordinateCardinality + 100, coordinateCardinality * 4)
+  const targetCardinality = spatialCardinality ?? coordinateCardinality ??
+    (visualDimensions.length === 1 ? fields.find((field) => field.qName === visualDimensions[0])?.qCardinal ?? null : null);
+  const names = spatialFieldNames.length ? spatialFieldNames : [latitudeField, longitudeField].filter(Boolean);
+  const spatialFields = names.map((name) => fields.find((f) => f.qName === name)).filter(Boolean);
+  const maxCardinality = targetCardinality
+    ? Math.max(targetCardinality + 100, targetCardinality * 4)
     : 5000;
 
   const preliminary = fields
     .filter((field) => Number.isFinite(field.qCardinal) && field.qCardinal > 0)
     .filter((field) => visualDimensions.includes(field.qName) || field.qCardinal <= maxCardinality)
-    .map((field) => scoreEntityCandidate(field, { coordinateCardinality, visualDimensions, coordinateFields }))
-    .sort((a, b) => b.score - a.score || Math.abs((a.cardinality ?? 0) - (coordinateCardinality ?? 0)) - Math.abs((b.cardinality ?? 0) - (coordinateCardinality ?? 0)));
+    .map((field) => scoreEntityCandidate(field, { spatialCardinality: targetCardinality, visualDimensions, spatialFields }))
+    .sort((a, b) => b.score - a.score || Math.abs((a.cardinality ?? 0) - (targetCardinality ?? 0)) - Math.abs((b.cardinality ?? 0) - (targetCardinality ?? 0)));
 
   const output = preliminary.slice(0, limit).map((item) => item.field);
   for (const dim of visualDimensions) {
@@ -139,23 +159,25 @@ export function candidatePool(fields, {
 }
 
 export function suggestEntityKeys(fields, {
+  spatialCardinality = null,
+  coordinateCardinality = null,
+  spatialFieldNames = [],
   latitudeField,
   longitudeField,
-  coordinateCardinality = null,
   visualDimensions = [],
   spatialProfiles = {},
   limit = 12
 } = {}) {
-  const lat = fields.find((f) => f.qName === latitudeField);
-  const lon = fields.find((f) => f.qName === longitudeField);
-  const target = coordinateCardinality ?? (Math.max(lat?.qCardinal ?? 0, lon?.qCardinal ?? 0) || null);
-  const coordinateFields = [lat, lon].filter(Boolean);
+  const names = spatialFieldNames.length ? spatialFieldNames : [latitudeField, longitudeField].filter(Boolean);
+  const spatialFields = names.map((name) => fields.find((f) => f.qName === name)).filter(Boolean);
+  const target = spatialCardinality ?? coordinateCardinality ??
+    (visualDimensions.length === 1 ? fields.find((field) => field.qName === visualDimensions[0])?.qCardinal ?? null : null);
 
   return fields
     .map((field) => scoreEntityCandidate(field, {
-      coordinateCardinality: target,
+      spatialCardinality: target,
       visualDimensions,
-      coordinateFields,
+      spatialFields,
       spatialProfile: spatialProfiles[field.qName] ?? null
     }))
     .filter((item) => item.score > 0 || visualDimensions.includes(item.field))

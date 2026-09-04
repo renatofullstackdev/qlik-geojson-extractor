@@ -1,8 +1,8 @@
 import { QixClient } from "./qix-client.js";
 import { candidatePool, listAppFields, summarizeFields, suggestEntityKeys } from "./app-inspector.js";
 import { inspectSheet, summarizePointLayers } from "./map-inspector.js";
-import { analyzeCoordinateFields, analyzeEntityCandidate } from "./spatial-analysis.js";
-import { buildPointCubeDefinition, createSessionCube, fetchAllStraightCubeRows } from "./hypercube.js";
+import { analyzeEntityCandidate, analyzeSpatialSource, spatialSourceFields } from "./spatial-analysis.js";
+import { buildPointCubeDefinition, createSessionCube, fetchAllStraightCubeRows, spatialModeFromConfig } from "./hypercube.js";
 import { rowsToPointGeoJSON, validatePointGeoJSON } from "./geojson.js";
 import { DIAGNOSTIC_CODES } from "./codes.js";
 import { coreError, ERROR_CODES, serializeError } from "./errors.js";
@@ -39,8 +39,22 @@ export function coordinateWarnings(layer, stats) {
     (stats.latitude.min < -90 || stats.latitude.max > 90) &&
     stats.latitude.min >= -180 && stats.latitude.max <= 180 &&
     stats.longitude.min >= -90 && stats.longitude.max <= 90;
-  if (swapWouldFix) {
-    warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_SWAP_LIKELY, severity: "warning", params: {} });
+  if (swapWouldFix) warnings.push({ code: DIAGNOSTIC_CODES.COORDINATE_SWAP_LIKELY, severity: "warning", params: {} });
+  return warnings;
+}
+
+export function spatialWarnings(layer, stats) {
+  if (layer.spatialMode === "coordinates") return coordinateWarnings(layer, stats);
+  const warnings = [];
+  const location = layer.locationDefinition;
+  if (location?.kind === "expression") {
+    warnings.push({ code: DIAGNOSTIC_CODES.LOCATION_COMPLEX_EXPRESSION, severity: "info", params: { expression: location.raw } });
+  }
+  if (!stats?.available) {
+    warnings.push({ code: DIAGNOSTIC_CODES.SPATIAL_STATS_UNAVAILABLE, severity: "info", params: { reason: stats?.reason ?? "unknown", spatialMode: "location" } });
+  }
+  if (layer.residualLongitudeDefinition?.raw) {
+    warnings.push({ code: DIAGNOSTIC_CODES.INACTIVE_LONGITUDE_IGNORED, severity: "info", params: { raw: layer.residualLongitudeDefinition.raw } });
   }
   return warnings;
 }
@@ -76,14 +90,10 @@ export class QlikGeoJSONExtractor {
         try {
           const sheetResult = await this.client.rpc(this.client.docHandle, "GetObject", [sheetId]);
           const sheetHandle = sheetResult?.qReturn?.qHandle;
-          if (typeof sheetHandle !== "number") {
-            throw coreError(ERROR_CODES.SHEET_GET_FAILED, "GetObject did not return a sheet handle.", { sheetId });
-          }
+          if (typeof sheetHandle !== "number") throw coreError(ERROR_CODES.SHEET_GET_FAILED, "GetObject did not return a sheet handle.", { sheetId });
           result.getSheet = "SUCCESS";
           const treeResult = await this.client.rpc(sheetHandle, "GetFullPropertyTree", []);
-          if (!treeResult?.qPropEntry) {
-            throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, "GetFullPropertyTree returned no qPropEntry.", { sheetId });
-          }
+          if (!treeResult?.qPropEntry) throw coreError(ERROR_CODES.PROPERTY_TREE_MISSING, "GetFullPropertyTree returned no qPropEntry.", { sheetId });
           result.getFullPropertyTree = "SUCCESS";
         } catch (error) {
           if (!result.getSheet) result.getSheet = "ERROR";
@@ -103,38 +113,37 @@ export class QlikGeoJSONExtractor {
       const fields = await listAppFields(this.client);
       const summarizedFields = summarizeFields(fields);
       const sheet = await inspectSheet(this.client, sheetId);
-      const pointLayers = summarizePointLayers(sheet.pointLayers);
+      const pointLayers = summarizePointLayers(sheet.pointLayers, fields);
       const fieldByName = new Map(fields.map((field) => [field.qName, field]));
       const diagnostics = [];
       const entityKeySuggestions = [];
 
       for (const layer of pointLayers) {
-        let coordinateStats;
+        let spatialStats;
         try {
-          coordinateStats = await analyzeCoordinateFields(this.client, layer.latitudeDefinition, layer.longitudeDefinition);
+          spatialStats = await analyzeSpatialSource(this.client, layer.spatialSource);
         } catch (error) {
-          coordinateStats = { available: false, reason: "analysis-error", error: serializeError(error) };
+          spatialStats = { available: false, type: layer.spatialMode, reason: "analysis-error", error: serializeError(error) };
         }
 
-        const coordinateCardinality = coordinateStats?.distinctPairs ??
-          (Math.max(
-            fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? 0,
-            fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? 0
-          ) || null);
-        const visualDimensions = layer.visualDimensions.map((name) => ({
-          field: name,
-          cardinality: fieldByName.get(name)?.qCardinal ?? null
-        }));
-        const warnings = coordinateWarnings(layer, coordinateStats);
+        const sourceFieldNames = spatialSourceFields(layer.spatialSource);
+        const sourceCardinalities = sourceFieldNames.map((name) => fieldByName.get(name)?.qCardinal).filter(Number.isFinite);
+        const spatialCardinality = spatialStats?.distinctRepresentations ??
+          (sourceCardinalities.length === 1 ? sourceCardinalities[0] : null);
+        const visualDimensions = layer.visualDimensions.map((name) => ({ field: name, cardinality: fieldByName.get(name)?.qCardinal ?? null }));
+        const warnings = spatialWarnings(layer, spatialStats);
         for (const dim of visualDimensions) {
-          if (coordinateCardinality && dim.cardinality && dim.cardinality < coordinateCardinality) {
+          if (spatialCardinality && dim.cardinality && dim.cardinality < spatialCardinality) {
             warnings.push({
-              code: DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_CARDINALITY,
+              code: layer.spatialMode === "coordinates"
+                ? DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_CARDINALITY
+                : DIAGNOSTIC_CODES.VISUAL_DIMENSION_LOWER_SPATIAL_CARDINALITY,
               severity: "warning",
               params: {
                 field: dim.field,
                 dimensionCardinality: dim.cardinality,
-                coordinateCardinality
+                coordinateCardinality: spatialCardinality,
+                spatialCardinality
               }
             });
           }
@@ -143,37 +152,39 @@ export class QlikGeoJSONExtractor {
         diagnostics.push({
           objectId: layer.objectId,
           layerId: layer.layerId,
-          latitudeField: layer.latitudeDefinition?.field,
-          longitudeField: layer.longitudeDefinition?.field,
+          spatialMode: layer.spatialMode,
+          spatialSource: layer.spatialSource,
+          spatialCardinality,
+          spatialStats,
+          latitudeField: layer.latitudeDefinition?.field ?? null,
+          longitudeField: layer.longitudeDefinition?.field ?? null,
+          locationField: layer.locationDefinition?.field ?? null,
           latitudeDefinition: layer.latitudeDefinition,
           longitudeDefinition: layer.longitudeDefinition,
-          latitudeCardinality: fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? coordinateStats?.latitude?.distinct ?? null,
-          longitudeCardinality: fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? coordinateStats?.longitude?.distinct ?? null,
-          coordinateCardinality,
-          coordinateStats,
+          locationDefinition: layer.locationDefinition,
+          latitudeCardinality: layer.spatialMode === "coordinates" ? fieldByName.get(layer.latitudeDefinition?.field)?.qCardinal ?? spatialStats?.latitude?.distinct ?? null : null,
+          longitudeCardinality: layer.spatialMode === "coordinates" ? fieldByName.get(layer.longitudeDefinition?.field)?.qCardinal ?? spatialStats?.longitude?.distinct ?? null : null,
+          locationCardinality: layer.spatialMode === "location" ? fieldByName.get(layer.locationDefinition?.field)?.qCardinal ?? spatialStats?.distinctLocations ?? null : null,
+          // Compatibility aliases for previous reports.
+          coordinateCardinality: layer.spatialMode === "coordinates" ? spatialCardinality : null,
+          coordinateStats: layer.spatialMode === "coordinates" ? spatialStats : null,
           visualDimensions,
           warnings
         });
 
         const pool = candidatePool(fields, {
-          coordinateCardinality,
-          latitudeField: layer.latitudeDefinition?.field,
-          longitudeField: layer.longitudeDefinition?.field,
+          spatialCardinality,
+          spatialFieldNames: sourceFieldNames,
           visualDimensions: layer.visualDimensions,
           limit: candidateAnalysisLimit
         });
         const spatialProfiles = {};
-        if (coordinateStats?.available) {
+        if (spatialStats?.available) {
           for (const fieldName of pool) {
             try {
-              spatialProfiles[fieldName] = await analyzeEntityCandidate(
-                this.client,
-                fieldName,
-                layer.latitudeDefinition,
-                layer.longitudeDefinition
-              );
+              spatialProfiles[fieldName] = await analyzeEntityCandidate(this.client, fieldName, layer.spatialSource);
             } catch (error) {
-              spatialProfiles[fieldName] = { available: false, reason: "analysis-error", error: serializeError(error) };
+              spatialProfiles[fieldName] = { available: false, type: layer.spatialMode, reason: "analysis-error", error: serializeError(error) };
             }
           }
         }
@@ -181,10 +192,10 @@ export class QlikGeoJSONExtractor {
         entityKeySuggestions.push({
           objectId: layer.objectId,
           layerId: layer.layerId,
+          spatialMode: layer.spatialMode,
           candidates: suggestEntityKeys(fields, {
-            latitudeField: layer.latitudeDefinition?.field,
-            longitudeField: layer.longitudeDefinition?.field,
-            coordinateCardinality,
+            spatialCardinality,
+            spatialFieldNames: sourceFieldNames,
             visualDimensions: layer.visualDimensions,
             spatialProfiles
           })
@@ -211,11 +222,16 @@ export class QlikGeoJSONExtractor {
     for (const key of required) {
       if (!config[key]) throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, `Missing extraction config: ${key}`, { key });
     }
-    if (!(config.latitudeField || config.latitudeExpression)) {
-      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: latitude", { key: "latitudeField|latitudeExpression" });
-    }
-    if (!(config.longitudeField || config.longitudeExpression)) {
-      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: longitude", { key: "longitudeField|longitudeExpression" });
+    const spatialMode = spatialModeFromConfig(config);
+    if (spatialMode === "coordinates") {
+      if (!(config.latitudeField || config.latitudeExpression)) {
+        throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: latitude", { key: "latitudeField|latitudeExpression" });
+      }
+      if (!(config.longitudeField || config.longitudeExpression)) {
+        throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: longitude", { key: "longitudeField|longitudeExpression" });
+      }
+    } else if (!(config.locationField || config.locationExpression)) {
+      throw coreError(ERROR_CODES.EXTRACTION_CONFIG_MISSING, "Missing extraction config: location", { key: "locationField|locationExpression" });
     }
 
     try {
@@ -229,7 +245,7 @@ export class QlikGeoJSONExtractor {
         const error = coreError(
           ERROR_CODES.MISSING_COORDINATES,
           `${converted.missing.length} entities have no valid coordinates.`,
-          { count: converted.missing.length },
+          { count: converted.missing.length, spatialMode },
           { missing: converted.missing }
         );
         throw error;

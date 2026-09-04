@@ -11,6 +11,52 @@ export function qlikFieldRef(fieldName) {
   return `[${String(fieldName).replace(/]/g, "]]" )}]`;
 }
 
+export function extractQlikFieldReferences(value) {
+  const text = String(value ?? "");
+  const fields = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== "[") continue;
+    let field = "";
+    let closed = false;
+    for (i += 1; i < text.length; i += 1) {
+      if (text[i] !== "]") {
+        field += text[i];
+        continue;
+      }
+      if (text[i + 1] === "]") {
+        field += "]";
+        i += 1;
+        continue;
+      }
+      closed = true;
+      break;
+    }
+    if (closed && field && !fields.includes(field)) fields.push(field);
+  }
+  return fields;
+}
+
+/**
+ * Returns true only for syntax that is strongly indicative of a Qlik
+ * expression. The function deliberately avoids treating punctuation that is
+ * common in field names (spaces, parentheses in labels, slashes, hyphens) as
+ * sufficient evidence by itself.
+ */
+export function looksLikeQlikExpression(value) {
+  let raw = String(value ?? "").trim();
+  if (!raw) return false;
+  if (raw.startsWith("=")) raw = raw.slice(1).trim();
+  if (!raw) return false;
+
+  // Function call at the beginning, e.g. Only(...), maxstring(...), If(...).
+  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*\s*\(/u.test(raw)) return true;
+  // Set analysis / aggregation fragments.
+  if (/\{\s*</.test(raw) || />\s*\}/.test(raw)) return true;
+  // Explicit expression operators around field references or literals.
+  if (/(?:\[[^\]]+\]|\)|\d|['"])[ \t]*(?:\+|\*|&|\/|<=|>=|<>|=)[ \t]*(?:\[[^\]]+\]|\(|\d|['"])/u.test(raw)) return true;
+  return false;
+}
+
 /**
  * Resolves Qlik references that are only a direct field reference.
  *
@@ -19,9 +65,11 @@ export function qlikFieldRef(fieldName) {
  *   =LATITUDE               -> LATITUDE
  *   [ENTITY NAME]           -> ENTITY NAME
  *   =[ENTITY NAME]          -> ENTITY NAME
+ *   Field With Spaces         -> Field With Spaces
  *
  * Complex expressions are deliberately not guessed:
  *   =Only([LATITUDE])       -> null
+ *   maxstring([Location])   -> null
  */
 export function resolveSimpleQlikFieldReference(value) {
   const raw = String(value ?? "").trim();
@@ -53,15 +101,15 @@ export function resolveSimpleQlikFieldReference(value) {
     return fieldName || null;
   }
 
-  if (!hadEquals) return expression;
+  if (looksLikeQlikExpression(expression)) return null;
 
-  // A leading '=' makes the value a Qlik expression. Only accept the
-  // expression when it is clearly a bare field identifier.
-  if (/^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression)) {
-    return expression;
+  if (hadEquals) {
+    // A leading '=' makes the value a Qlik expression. Only accept it when it
+    // is clearly a bare field identifier.
+    return /^[\p{L}_$%][\p{L}\p{N}_.$%]*$/u.test(expression) ? expression : null;
   }
 
-  return null;
+  return expression;
 }
 
 export function qTextOrNum(value) {
@@ -91,6 +139,28 @@ export function numberOrNull(value) {
 export function validCoordinates(longitude, latitude) {
   return Number.isFinite(longitude) && Number.isFinite(latitude) &&
     longitude >= -180 && longitude <= 180 && latitude >= -90 && latitude <= 90;
+}
+
+/**
+ * Parses only the native Qlik point representation: [longitude, latitude].
+ * It intentionally does not geocode names/addresses and does not guess WKT or
+ * arbitrary delimited strings.
+ */
+export function parseQlikPoint(value) {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    const text = candidate.trim();
+    if (!text.startsWith("[") || !text.endsWith("]")) return null;
+    try {
+      candidate = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(candidate) || candidate.length !== 2) return null;
+  const longitude = numberOrNull(candidate[0]);
+  const latitude = numberOrNull(candidate[1]);
+  return validCoordinates(longitude, latitude) ? { longitude, latitude } : null;
 }
 
 export function googleMapsUrl(longitude, latitude) {

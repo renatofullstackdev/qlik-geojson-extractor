@@ -1,4 +1,4 @@
-import { qlikFieldRef, resolveSimpleQlikFieldReference } from "./utils.js";
+import { extractQlikFieldReferences, looksLikeQlikExpression, qlikFieldRef, resolveSimpleQlikFieldReference } from "./utils.js";
 import { coreError, ERROR_CODES } from "./errors.js";
 
 export function walkPropertyTree(entry, path = "sheet", output = []) {
@@ -42,44 +42,77 @@ export async function inspectSheet(client, sheetId) {
   return { sheetId, tree, objects, pointLayers };
 }
 
-export function coordinateDefinition(rawValue) {
+function knownFieldSet(knownFields = []) {
+  return new Set(knownFields.map((item) => typeof item === "string" ? item : item?.qName ?? item?.name).filter(Boolean));
+}
+
+export function coordinateDefinition(rawValue, knownFields = []) {
   const raw = String(rawValue ?? "").trim();
-  if (!raw) return { kind: "unknown", raw: null, field: null, expression: null };
+  if (!raw) return { kind: "unknown", raw: null, field: null, expression: null, referencedFields: [] };
+
+  const fields = knownFieldSet(knownFields);
+  const withoutEquals = raw.startsWith("=") ? raw.slice(1).trim() : raw;
+  if (fields.has(withoutEquals)) {
+    return { kind: "field", raw, field: withoutEquals, expression: qlikFieldRef(withoutEquals), referencedFields: [withoutEquals] };
+  }
+
   const field = resolveSimpleQlikFieldReference(raw);
-  if (field) {
-    return { kind: "field", raw, field, expression: qlikFieldRef(field) };
+  if (field && (!fields.size || fields.has(field) || !looksLikeQlikExpression(raw))) {
+    return { kind: "field", raw, field, expression: qlikFieldRef(field), referencedFields: [field] };
   }
-  if (raw.startsWith("=")) {
-    const expression = raw.slice(1).trim();
-    return { kind: "expression", raw, field: null, expression: expression || null };
+
+  if (looksLikeQlikExpression(raw) || raw.startsWith("=")) {
+    const expression = raw.startsWith("=") ? raw.slice(1).trim() : raw;
+    return {
+      kind: "expression",
+      raw,
+      field: null,
+      expression: expression || null,
+      referencedFields: extractQlikFieldReferences(expression)
+    };
   }
-  return { kind: "field", raw, field: raw, expression: qlikFieldRef(raw) };
+
+  return { kind: "unknown", raw, field: null, expression: null, referencedFields: [] };
 }
 
-function resolvedDimension(value) {
-  return resolveSimpleQlikFieldReference(value) ?? value ?? null;
+function resolvedDimension(value, knownFields) {
+  return coordinateDefinition(value, knownFields).field ?? resolveSimpleQlikFieldReference(value) ?? value ?? null;
 }
 
-export function summarizePointLayers(pointLayers) {
+export function summarizePointLayers(pointLayers, knownFields = []) {
   return pointLayers.map((item) => {
-    const latitudeRaw = item.layer?.locationOrLatitude?.key ?? null;
+    const locationRaw = item.layer?.locationOrLatitude?.key ?? null;
     const longitudeRaw = item.layer?.longitude?.key ?? null;
-    const latitudeDefinition = coordinateDefinition(latitudeRaw);
-    const longitudeDefinition = coordinateDefinition(longitudeRaw);
+    const isLatLong = item.layer?.isLatLong === true;
+    const primaryDefinition = coordinateDefinition(locationRaw, knownFields);
+    const configuredLongitudeDefinition = coordinateDefinition(longitudeRaw, knownFields);
+    const latitudeDefinition = isLatLong ? primaryDefinition : null;
+    const longitudeDefinition = isLatLong ? configuredLongitudeDefinition : null;
+    const locationDefinition = isLatLong ? null : primaryDefinition;
     const visualDimensionsRaw = item.layer?.qHyperCubeDef?.qDimensions
       ?.flatMap((d) => d?.qDef?.qFieldDefs ?? []) ?? [];
+
+    const spatialSource = isLatLong
+      ? { type: "coordinates", latitudeDefinition, longitudeDefinition }
+      : { type: "location", locationDefinition };
 
     return {
       objectId: item.objectId,
       layerId: item.layerId,
       layerIndex: item.layerIndex,
-      isLatLong: !!item.layer?.isLatLong,
-      locationOrLatitude: latitudeDefinition.field ?? latitudeRaw,
-      longitude: longitudeDefinition.field ?? longitudeRaw,
+      isLatLong,
+      spatialMode: spatialSource.type,
+      spatialSource,
+      locationOrLatitude: primaryDefinition.field ?? primaryDefinition.expression ?? locationRaw,
+      longitude: isLatLong ? (configuredLongitudeDefinition.field ?? configuredLongitudeDefinition.expression ?? longitudeRaw) : null,
       latitudeDefinition,
       longitudeDefinition,
-      visualDimensions: visualDimensionsRaw.map(resolvedDimension),
-      locationOrLatitudeRaw: latitudeRaw,
+      locationDefinition,
+      // Preserve inactive configuration for diagnostics only. It must not be
+      // interpreted as an active longitude when isLatLong=false.
+      residualLongitudeDefinition: isLatLong ? null : configuredLongitudeDefinition,
+      visualDimensions: visualDimensionsRaw.map((value) => resolvedDimension(value, knownFields)),
+      locationOrLatitudeRaw: locationRaw,
       longitudeRaw,
       visualDimensionsRaw,
       measureCount: item.layer?.qHyperCubeDef?.qMeasures?.length ?? 0,

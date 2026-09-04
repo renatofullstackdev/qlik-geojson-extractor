@@ -1,14 +1,20 @@
-import { googleMapsUrl, numberOrNull, qNumOrText, qTextOrNum, validCoordinates, wazeUrl } from "./utils.js";
+import { googleMapsUrl, numberOrNull, parseQlikPoint, qNumOrText, qTextOrNum, validCoordinates, wazeUrl } from "./utils.js";
 import { coreError, ERROR_CODES } from "./errors.js";
+import { spatialModeFromConfig } from "./hypercube.js";
 
 export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measures) {
   const attrInfo = hyperCube?.qDimensionInfo?.[0]?.qAttrExprInfo ?? [];
   const attrIndex = new Map();
   attrInfo.forEach((info, index) => { if (info?.id) attrIndex.set(info.id, index); });
+  const spatialMode = spatialModeFromConfig(config);
   const latIndex = attrIndex.get("__latitude");
   const lonIndex = attrIndex.get("__longitude");
-  if (latIndex === undefined || lonIndex === undefined) {
+  const locationIndex = attrIndex.get("__location");
+  if (spatialMode === "coordinates" && (latIndex === undefined || lonIndex === undefined)) {
     throw coreError(ERROR_CODES.LAT_LON_ATTRIBUTES_MISSING, "Latitude/longitude attribute expressions were not materialized.");
+  }
+  if (spatialMode === "location" && locationIndex === undefined) {
+    throw coreError(ERROR_CODES.LOCATION_ATTRIBUTE_MISSING, "Location attribute expression was not materialized.");
   }
 
   const featureCollection = { type: "FeatureCollection", name: config.name ?? "qlik_points", features: [] };
@@ -45,8 +51,21 @@ export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measur
       properties[m.label] = qNumOrText(row[index + 1]);
     });
 
-    let latitude = numberOrNull(qNumOrText(attrValues[latIndex]));
-    let longitude = numberOrNull(qNumOrText(attrValues[lonIndex]));
+    let latitude = null;
+    let longitude = null;
+    let rawLocation = null;
+    if (spatialMode === "coordinates") {
+      latitude = numberOrNull(qNumOrText(attrValues[latIndex]));
+      longitude = numberOrNull(qNumOrText(attrValues[lonIndex]));
+    } else {
+      rawLocation = qTextOrNum(attrValues[locationIndex]);
+      if (config.locationOutput !== false) properties[config.locationOutput ?? "location"] = rawLocation;
+      const point = parseQlikPoint(rawLocation);
+      if (point) {
+        latitude = point.latitude;
+        longitude = point.longitude;
+      }
+    }
     let coordinateSource = config.coordinateSourceValue ?? "Qlik";
 
     if (!validCoordinates(longitude, latitude)) {
@@ -77,7 +96,7 @@ export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measur
     }
 
     if (!validCoordinates(longitude, latitude)) {
-      missing.push({ ...properties, latitude: null, longitude: null });
+      missing.push({ ...properties, spatialMode, location: spatialMode === "location" ? rawLocation : undefined, latitude: null, longitude: null });
       return;
     }
 
@@ -98,6 +117,7 @@ export function rowsToPointGeoJSON(rows, hyperCube, config, propertyDefs, measur
 
   return {
     featureCollection,
+    spatialMode,
     missing,
     appliedOverrides,
     skippedNullEntities,

@@ -32,31 +32,60 @@ export function normalizeMeasures(measures = []) {
   return measures.map((m) => typeof m === "string" ? { label: m, expression: m } : m);
 }
 
-function coordinateExpression(config, axis) {
-  const expression = config[`${axis}Expression`];
+function configuredExpression(config, prefix) {
+  const expression = config[`${prefix}Expression`];
   if (expression) return String(expression).replace(/^=/, "").trim();
-  const field = config[`${axis}Field`];
+  const field = config[`${prefix}Field`];
   return field ? `Only(${qlikFieldRef(field)})` : null;
+}
+
+export function spatialModeFromConfig(config = {}) {
+  if (config.spatialMode === "location" || config.locationField || config.locationExpression) return "location";
+  return "coordinates";
 }
 
 export function buildPointCubeDefinition(config) {
   const propertyDefs = (config.properties ?? []).map(propertyExpression);
-  const latitudeExpression = coordinateExpression(config, "latitude");
-  const longitudeExpression = coordinateExpression(config, "longitude");
-  if (!latitudeExpression || !longitudeExpression) {
-    throw coreError(
-      ERROR_CODES.EXTRACTION_CONFIG_MISSING,
-      "Latitude/longitude extraction definitions are missing.",
-      { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
-    );
-  }
-
-  const attributeExpressions = [
-    ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` })),
-    { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
-    { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
-  ];
+  const spatialMode = spatialModeFromConfig(config);
   const measures = normalizeMeasures(config.measures);
+  const attributeExpressions = [
+    ...propertyDefs.map((p, i) => ({ qExpression: p.expression, qLabel: p.label, qNumFormat: { qType: "U" }, id: `__property_${i}` }))
+  ];
+  const spatialExpressions = {};
+
+  if (spatialMode === "coordinates") {
+    const latitudeExpression = configuredExpression(config, "latitude");
+    const longitudeExpression = configuredExpression(config, "longitude");
+    if (!latitudeExpression || !longitudeExpression) {
+      throw coreError(
+        ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+        "Latitude/longitude extraction definitions are missing.",
+        { key: !latitudeExpression ? "latitudeField|latitudeExpression" : "longitudeField|longitudeExpression" }
+      );
+    }
+    attributeExpressions.push(
+      { qExpression: latitudeExpression, qLabel: config.latitudeField ?? "latitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__latitude" },
+      { qExpression: longitudeExpression, qLabel: config.longitudeField ?? "longitude", qNumFormat: { qType: "R", qnDec: 10, qUseThou: 0 }, id: "__longitude" }
+    );
+    spatialExpressions.latitude = latitudeExpression;
+    spatialExpressions.longitude = longitudeExpression;
+  } else {
+    const locationExpression = configuredExpression(config, "location");
+    if (!locationExpression) {
+      throw coreError(
+        ERROR_CODES.EXTRACTION_CONFIG_MISSING,
+        "Location extraction definition is missing.",
+        { key: "locationField|locationExpression" }
+      );
+    }
+    attributeExpressions.push({
+      qExpression: locationExpression,
+      qLabel: config.locationField ?? "location",
+      qNumFormat: { qType: "U" },
+      id: "__location"
+    });
+    spatialExpressions.location = locationExpression;
+  }
 
   return {
     definition: {
@@ -78,7 +107,12 @@ export function buildPointCubeDefinition(config) {
     },
     propertyDefs,
     measures,
-    coordinateExpressions: { latitude: latitudeExpression, longitude: longitudeExpression }
+    spatialMode,
+    spatialExpressions,
+    // Compatibility for callers that used the old return property.
+    coordinateExpressions: spatialMode === "coordinates"
+      ? { latitude: spatialExpressions.latitude, longitude: spatialExpressions.longitude }
+      : null
   };
 }
 
