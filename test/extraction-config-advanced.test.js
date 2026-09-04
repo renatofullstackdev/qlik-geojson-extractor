@@ -5,6 +5,7 @@ import {
   decodeCoordinateSelection,
   encodeCoordinateSelection,
   fieldsMatchingQuery,
+  locationFieldGroups,
   relatedFields
 } from "../chrome-extension/lib/extraction-config.js";
 
@@ -55,4 +56,17 @@ test("diagnostic report separates audit metadata from extracted feature values",
   assert.equal(report.entityKey, "ENTITY");
   assert.equal(report.extraction.featureCount, 2);
   assert.equal("featureCollection" in report.extraction, false);
+});
+
+
+test("locationFieldGroups prioritizes referenced and geospatial fields without requiring numeric tags", () => {
+  const fields = [
+    { name: "LOCATION", cardinality: 10, tags: ["$geopoint"], sourceTables: ["PLACES"] },
+    { name: "DISPLAY", cardinality: 10, tags: [], sourceTables: ["PLACES"] },
+    { name: "OTHER", cardinality: 100, tags: ["$numeric"], sourceTables: ["OTHER"] }
+  ];
+  const groups = locationFieldGroups(fields, "", ["DISPLAY"]);
+  assert.deepEqual(groups.referenced.map((x) => x.name), ["DISPLAY"]);
+  assert.deepEqual(groups.geo.map((x) => x.name), ["LOCATION"]);
+  assert.deepEqual(groups.other.map((x) => x.name), ["OTHER"]);
 });

@@ -33,3 +33,18 @@ test("fetchAllStraightCubeRows paginates without gaps or duplicates", async () =
   assert.deepEqual(calls.map(({ qTop, qHeight }) => [qTop, qHeight]), [[0,3],[3,3],[6,3],[9,1]]);
   assert.deepEqual(rows.flat(), Array.from({ length: 10 }, (_, i) => `row-${i}`));
 });
+
+
+test("buildPointCubeDefinition supports a single Qlik location source without latitude/longitude attributes", () => {
+  const result = buildPointCubeDefinition({
+    entityKey: "ENTITY",
+    spatialMode: "location",
+    locationExpression: "Only([LOCATION])",
+    properties: ["NAME"]
+  });
+  const attrs = result.definition.qHyperCubeDef.qDimensions[0].qAttributeExpressions;
+  assert.equal(result.spatialMode, "location");
+  assert.deepEqual(attrs.map((item) => item.id), ["__property_0", "__location"]);
+  assert.equal(attrs[1].qExpression, "Only([LOCATION])");
+  assert.equal(result.coordinateExpressions, null);
+});

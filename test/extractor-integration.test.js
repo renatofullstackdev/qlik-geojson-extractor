@@ -113,3 +113,30 @@ test("inspect emits structured aggregation diagnostics and ranks the spatial 1:1
   assert.equal(report.entityKeySuggestions[0].candidates[0].confidence, "high");
   assert.equal(client.closed, true);
 });
+
+
+class LocationExtractClient {
+  constructor(rows) { this.rows = rows; this.docHandle = 1; }
+  async connectAndOpen() { return { docHandle: 1 }; }
+  close() {}
+  async rpc(handle, method) {
+    if (method === "CreateSessionObject") return { qReturn: { qHandle: 10 } };
+    if (method === "GetLayout") return { qLayout: { qHyperCube: {
+      qSize: { qcy: this.rows.length, qcx: 1 },
+      qDimensionInfo: [{ qAttrExprInfo: [{ id: "__location" }] }]
+    } } };
+    if (method === "GetHyperCubeData") return { qDataPages: [{ qMatrix: this.rows }] };
+    throw new Error(`unexpected ${method}`);
+  }
+}
+
+test("extract supports location-mode Qlik geopoints end-to-end", async () => {
+  const rows = [[cell("A", NaN, [cell("[-48.1, -15.8]", NaN)])]];
+  const extractor = new QlikGeoJSONExtractor({}, { client: new LocationExtractClient(rows) });
+  const result = await extractor.extract({
+    appId: "APP", entityKey: "ENTITY", spatialMode: "location", locationField: "LOCATION"
+  });
+  assert.equal(result.spatialMode, "location");
+  assert.equal(result.featureCount, 1);
+  assert.deepEqual(result.featureCollection.features[0].geometry.coordinates, [-48.1, -15.8]);
+});

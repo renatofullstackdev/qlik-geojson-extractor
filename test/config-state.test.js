@@ -23,3 +23,12 @@ test("saved configuration survives a JSON round trip without losing effective ch
   assert.deepEqual(result.measures, input.measures);
   assert.equal(result.advancedMode, true);
 });
+
+
+test("saved configuration preserves location-mode selections", () => {
+  const input = { layerIndex: 1, spatialMode: "location", locationSelection: "field:GeoPoint", entityKey: "ENTITY" };
+  const result = savedConfigRoundTrip(input);
+  assert.equal(result.version, 3);
+  assert.equal(result.spatialMode, "location");
+  assert.equal(result.locationSelection, "field:GeoPoint");
+});

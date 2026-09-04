@@ -7,6 +7,8 @@ import {
   qNumOrText,
   qTextOrNum,
   resolveSimpleQlikFieldReference,
+  looksLikeQlikExpression,
+  parseQlikPoint,
   validCoordinates
 } from "../src/utils.js";
 
@@ -46,4 +48,19 @@ test("Qlik qIsNull cells are null even when qText contains '-'", () => {
   const value = { qText: "-", qNum: Number.NaN, qIsNull: true };
   assert.equal(qTextOrNum(value), null);
   assert.equal(qNumOrText(value), null);
+});
+
+
+test("expression detector recognizes function syntax without a leading equals sign", () => {
+  assert.equal(looksLikeQlikExpression("maxstring([LOCATION])"), true);
+  assert.equal(resolveSimpleQlikFieldReference("maxstring([LOCATION])"), null);
+  assert.equal(resolveSimpleQlikFieldReference("Entity Label (TABLE)"), "Entity Label (TABLE)");
+});
+
+test("parseQlikPoint accepts only native Qlik [longitude, latitude] points", () => {
+  assert.deepEqual(parseQlikPoint("[-48.1, -15.8]"), { longitude: -48.1, latitude: -15.8 });
+  assert.deepEqual(parseQlikPoint([-48.1, -15.8]), { longitude: -48.1, latitude: -15.8 });
+  assert.equal(parseQlikPoint("POINT(-48.1 -15.8)"), null);
+  assert.equal(parseQlikPoint("Brasília"), null);
+  assert.equal(parseQlikPoint("[-15.8, -148.1]"), null);
 });

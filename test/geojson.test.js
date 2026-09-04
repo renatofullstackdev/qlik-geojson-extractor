@@ -114,3 +114,27 @@ test("GeoJSON validator reports invalid root, geometry and coordinates with stru
   ] });
   assert.equal(coords.errors[0].code, ERROR_CODES.GEOJSON_COORDINATES_INVALID);
 });
+
+
+test("location mode converts native Qlik geopoint strings to GeoJSON points", () => {
+  const locationCube = { qDimensionInfo: [{ qAttrExprInfo: [{ id: "__location" }] }] };
+  const rows = [[cell("u1", Number.NaN, [cell("[-48.12, -15.81]", Number.NaN)])]];
+  const result = rowsToPointGeoJSON(rows, locationCube, {
+    entityKey: "UNIT_ID", spatialMode: "location", locationField: "LOCATION"
+  }, [], []);
+  assert.equal(result.spatialMode, "location");
+  assert.equal(result.featureCollection.features.length, 1);
+  assert.deepEqual(result.featureCollection.features[0].geometry.coordinates, [-48.12, -15.81]);
+  assert.equal(result.featureCollection.features[0].properties.location, "[-48.12, -15.81]");
+});
+
+test("location mode preserves non-geometric locations as missing instead of guessing coordinates", () => {
+  const locationCube = { qDimensionInfo: [{ qAttrExprInfo: [{ id: "__location" }] }] };
+  const rows = [[cell("u1", Number.NaN, [cell("Named place", Number.NaN)])]];
+  const result = rowsToPointGeoJSON(rows, locationCube, {
+    entityKey: "UNIT_ID", spatialMode: "location", locationField: "LOCATION", requireAllCoordinates: false
+  }, [], []);
+  assert.equal(result.featureCollection.features.length, 0);
+  assert.equal(result.missing.length, 1);
+  assert.equal(result.missing[0].location, "Named place");
+});

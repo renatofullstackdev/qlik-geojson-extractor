@@ -58,5 +58,37 @@ test("PointLayer summary resolves simple references and preserves complex coordi
 });
 
 test("coordinateDefinition never guesses a complex Qlik expression as a field", () => {
-  assert.deepEqual(coordinateDefinition("=Only([LAT])"), { kind: "expression", raw: "=Only([LAT])", field: null, expression: "Only([LAT])" });
+  const result = coordinateDefinition("=Only([LAT])");
+  assert.equal(result.kind, "expression");
+  assert.equal(result.expression, "Only([LAT])");
+  assert.deepEqual(result.referencedFields, ["LAT"]);
+});
+
+
+test("complex Qlik expression without leading equals is still classified as an expression", () => {
+  const result = coordinateDefinition('maxstring({<[ENTITY]={"*A*"}>}[LOCATION])');
+  assert.equal(result.kind, "expression");
+  assert.equal(result.field, null);
+  assert.deepEqual(result.referencedFields, ["ENTITY", "LOCATION"]);
+});
+
+test("isLatLong=false creates a location spatial source and ignores residual longitude", () => {
+  const result = summarizePointLayers([{
+    objectId: "map-location", layerId: "layer-location", layerIndex: 0,
+    layer: {
+      type: "PointLayer", isLatLong: false,
+      locationOrLatitude: { key: "=GeoLocation" },
+      longitude: { key: "=OLD_LONGITUDE" },
+      qHyperCubeDef: { qDimensions: [{ qDef: { qFieldDefs: ["=ENTITY"] } }], qMeasures: [] }
+    }
+  }], [
+    { qName: "GeoLocation" }, { qName: "OLD_LONGITUDE" }, { qName: "ENTITY" }
+  ]);
+  const layer = result[0];
+  assert.equal(layer.spatialMode, "location");
+  assert.equal(layer.locationDefinition.kind, "field");
+  assert.equal(layer.locationDefinition.field, "GeoLocation");
+  assert.equal(layer.latitudeDefinition, null);
+  assert.equal(layer.longitudeDefinition, null);
+  assert.equal(layer.residualLongitudeDefinition.field, "OLD_LONGITUDE");
 });
