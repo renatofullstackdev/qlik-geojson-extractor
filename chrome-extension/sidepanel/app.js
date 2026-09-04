@@ -1,19 +1,32 @@
 import { configStorageKey, hostPermissionPattern, parseQlikSenseUrl, safeFilename } from "../lib/qlik-url.js";
-import { buildPropertyDefinitions, coordinateFieldGroups, extractionHealth } from "../lib/extraction-config.js";
+import {
+  applyBulkAggregation,
+  buildDiagnosticReport,
+  buildPropertyDefinitions,
+  coordinateFieldGroups,
+  decodeCoordinateSelection,
+  encodeCoordinateSelection,
+  extractionHealth,
+  fieldsMatchingQuery,
+  relatedFields
+} from "../lib/extraction-config.js";
+import { normalizeSavedConfig } from "../lib/config-state.js";
+import { confidenceLabel, localizeCoreError, localizeDiagnostic, localizeEvidence } from "../lib/i18n.js";
 
-const els = Object.fromEntries([
-  "connectionBadge", "detectButton", "pageMessage", "hostAccessBadge", "hostAccessButton",
+const ids = [
+  "connectionBadge", "detectButton", "pageMessage", "hostAccessBadge", "hostAccessButton", "advancedModeInput",
   "appIdInput", "sheetIdInput", "virtualProxyInput", "probeButton", "inspectButton", "probeOutput",
-  "inspectionSection", "layerSelect", "latitudeInput", "longitudeInput", "layerDiagnostic", "entityKeySelect",
-  "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "customPropertiesSection",
-  "addCustomPropertyButton", "customPropertyList", "measuresSection", "addMeasureButton", "measureList",
+  "inspectionSection", "layerSelect", "latitudeInput", "longitudeInput", "layerDiagnostic", "entityKeySelect", "entityKeyAssessment",
+  "propertiesSection", "selectedPropertyCount", "fieldSearchInput", "fieldList", "selectFilteredButton", "selectRelatedButton",
+  "clearPropertiesButton", "bulkAggregationSelect", "applyBulkAggregationButton", "bulkWarning",
+  "customPropertiesSection", "addCustomPropertyButton", "customPropertyList", "measuresSection", "addMeasureButton", "measureList",
   "optionsSection", "datasetNameInput", "navigationLinksInput", "requireAllCoordinatesInput", "skipNullEntitiesInput",
-  "coordinateSourceFieldInput", "coordinateSourceValueInput", "coordinateOverridesInput", "effectiveConfigDetails",
-  "effectiveConfigOutput", "saveConfigButton", "loadConfigButton", "clearConfigButton",
-  "extractSection", "extractButton", "extractStatus", "resultSummary",
-  "missingDetails", "missingOutput", "skippedDetails", "skippedOutput", "previewDetails", "previewOutput",
-  "downloadButton", "toast"
-].map((id) => [id, document.getElementById(id)]));
+  "coordinateSourceFieldInput", "coordinateSourceValueInput", "coordinateOverridesInput", "effectiveConfigDetails", "effectiveConfigOutput",
+  "saveConfigButton", "loadConfigButton", "clearConfigButton", "extractSection", "readinessPanel", "extractButton", "extractStatus",
+  "resultSummary", "missingDetails", "missingOutput", "skippedDetails", "skippedOutput", "previewDetails", "previewOutput",
+  "downloadButton", "downloadDiagnosticButton", "toast"
+];
+const els = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 let pageContext = null;
 let currentHostPattern = null;
@@ -23,72 +36,61 @@ let selectedProperties = new Map();
 let customProperties = [];
 let measures = [];
 let currentResult = null;
+let currentDiagnosticReport = null;
 let toastTimer = null;
 
 const aggregations = [
-  ["only", "Only"],
-  ["concat", "Concat distinct"],
-  ["max", "Max"],
-  ["min", "Min"],
-  ["maxTimestamp", "Max timestamp"]
+  ["only", "Somente um valor (Only)"],
+  ["concat", "Concatenar distintos"],
+  ["max", "Máximo"],
+  ["min", "Mínimo"],
+  ["maxTimestamp", "Data/hora mais recente"]
 ];
 
+const SESSION_CONTEXT_KEY = "qlikGeojsonGrantedTabContext";
+
+function pretty(value) { return JSON.stringify(value, null, 2); }
+function uiError(message, technicalMessage = null) {
+  const error = new Error(message);
+  error.userFacing = true;
+  error.technicalMessage = technicalMessage;
+  return error;
+}
+function setVisible(element, visible) { if (element) element.classList.toggle("hidden", !visible); }
+function setConnectionBadge(state, text) { els.connectionBadge.className = `badge ${state}`; els.connectionBadge.textContent = text; }
 function setBusy(button, busy, label) {
   if (!button) return;
-  if (busy) {
-    button.dataset.originalLabel = button.textContent;
-    button.textContent = label ?? "Processando...";
-    button.disabled = true;
-  } else {
-    button.textContent = button.dataset.originalLabel || button.textContent;
-    button.disabled = false;
-  }
+  if (busy) { button.dataset.originalLabel = button.textContent; button.textContent = label ?? "Processando..."; button.disabled = true; }
+  else { button.textContent = button.dataset.originalLabel || button.textContent; button.disabled = false; }
 }
-
 function showToast(message, type = "success") {
   clearTimeout(toastTimer);
   els.toast.textContent = message;
   els.toast.className = `toast ${type}`;
-  toastTimer = setTimeout(() => {
-    els.toast.className = "toast hidden";
-  }, 4200);
+  toastTimer = setTimeout(() => { els.toast.className = "toast hidden"; }, 5000);
 }
-
-function setConnectionBadge(state, text) {
-  els.connectionBadge.className = `badge ${state}`;
-  els.connectionBadge.textContent = text;
+function setAdvancedMode(enabled) {
+  document.body.classList.toggle("advanced-mode", !!enabled);
+  els.advancedModeInput.checked = !!enabled;
 }
-
-function setVisible(element, visible) {
-  element.classList.toggle("hidden", !visible);
+function friendlyError(error) {
+  if (error?.code && error.code !== "HOST_PERMISSION_REQUIRED") return localizeCoreError(error).message;
+  if (error?.userFacing) return error.message;
+  return permissionHint(error);
 }
-
-function pretty(value) {
-  return JSON.stringify(value, null, 2);
-}
-
-const SESSION_CONTEXT_KEY = "qlikGeojsonGrantedTabContext";
 
 async function getGrantedTabContext({ retry = true } = {}) {
   const attempts = retry ? 12 : 1;
   for (let attempt = 0; attempt < attempts; attempt++) {
     const stored = (await chrome.storage.session.get(SESSION_CONTEXT_KEY))[SESSION_CONTEXT_KEY];
     if (stored?.tabId) return stored;
-    if (attempt + 1 < attempts) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 100));
   }
-
-  throw new Error(
-    "Nenhuma guia foi associada à extensão. Abra a sheet Qlik e clique no ícone da extensão na barra do Chrome."
-  );
+  throw new Error("Nenhuma guia foi associada à extensão. Abra a sheet Qlik e clique no ícone da extensão na barra do Chrome.");
 }
 
 async function getGrantedPageUrl(context) {
-  const result = await chrome.scripting.executeScript({
-    target: { tabId: context.tabId },
-    func: () => location.href
-  });
+  const result = await chrome.scripting.executeScript({ target: { tabId: context.tabId }, func: () => location.href });
   return result?.[0]?.result ?? null;
 }
 
@@ -100,58 +102,27 @@ function renderHostAccessState() {
     els.hostAccessButton.disabled = true;
     return;
   }
-
   els.hostAccessButton.disabled = false;
-  if (hostAccessGranted) {
-    els.hostAccessBadge.className = "badge success";
-    els.hostAccessBadge.textContent = "permitido";
-    els.hostAccessButton.textContent = "Remover acesso deste site";
-  } else {
-    els.hostAccessBadge.className = "badge error";
-    els.hostAccessBadge.textContent = "não permitido";
-    els.hostAccessButton.textContent = "Permitir acesso a este site";
-  }
+  els.hostAccessBadge.className = `badge ${hostAccessGranted ? "success" : "error"}`;
+  els.hostAccessBadge.textContent = hostAccessGranted ? "permitido" : "não permitido";
+  els.hostAccessButton.textContent = hostAccessGranted ? "Remover acesso deste site" : "Permitir acesso a este site";
 }
-
 async function refreshHostAccessState() {
-  if (!currentHostPattern) {
-    hostAccessGranted = false;
-    renderHostAccessState();
-    return false;
-  }
-
-  hostAccessGranted = await chrome.permissions.contains({ origins: [currentHostPattern] });
+  hostAccessGranted = currentHostPattern ? await chrome.permissions.contains({ origins: [currentHostPattern] }) : false;
   renderHostAccessState();
   return hostAccessGranted;
 }
-
 function requestOrRemoveCurrentHostAccess() {
-  // permissions.request() must originate from a user gesture. This function is
-  // called directly from the Side Panel button click and intentionally does no
-  // asynchronous work before requesting the permission.
-  if (!currentHostPattern) {
-    showToast("Abra uma sheet Qlik e detecte a página antes de conceder acesso.", "error");
-    return;
-  }
-
+  if (!currentHostPattern) { showToast("Abra uma sheet Qlik e detecte a página antes de conceder acesso.", "error"); return; }
   const operation = hostAccessGranted
     ? chrome.permissions.remove({ origins: [currentHostPattern] })
     : chrome.permissions.request({ origins: [currentHostPattern] });
-
   void operation.then(async (changed) => {
     await refreshHostAccessState();
-    if (hostAccessGranted) {
-      showToast("Acesso concedido somente ao host Qlik atual.");
-      await detectContext({ quiet: true });
-    } else if (changed) {
-      showToast("Acesso ao host removido.");
-      setConnectionBadge("neutral", "não testado");
-    } else {
-      showToast("O Chrome não concedeu acesso ao host Qlik.", "error");
-    }
-  }).catch((error) => {
-    showToast(`Não foi possível alterar a permissão do host: ${error.message}`, "error");
-  });
+    if (hostAccessGranted) { showToast("Acesso concedido somente ao host Qlik atual."); await detectContext({ quiet: true }); }
+    else if (changed) { showToast("Acesso ao host removido."); setConnectionBadge("neutral", "não testado"); }
+    else showToast("O Chrome não concedeu acesso ao host Qlik.", "error");
+  }).catch((error) => { console.error(error); showToast("Não foi possível alterar a permissão do host.", "error"); });
 }
 
 async function detectContext({ quiet = false } = {}) {
@@ -159,58 +130,32 @@ async function detectContext({ quiet = false } = {}) {
     const granted = await getGrantedTabContext();
     let href = granted.url;
     let parsed = parseQlikSenseUrl(href);
-
     currentHostPattern = hostPermissionPattern(href);
     await refreshHostAccessState();
-
-    // After the user has granted the exact host, refresh the actual page URL so
-    // same-origin navigation to another app/sheet is detected without another
-    // permission prompt.
     if (hostAccessGranted) {
-      try {
-        const currentHref = await getGrantedPageUrl(granted);
-        if (currentHref) {
-          href = currentHref;
-          parsed = parseQlikSenseUrl(href);
-          const newPattern = hostPermissionPattern(href);
-          if (newPattern !== currentHostPattern) {
-            currentHostPattern = newPattern;
-            await refreshHostAccessState();
-          }
-          await chrome.storage.session.set({
-            [SESSION_CONTEXT_KEY]: { ...granted, url: href, capturedAt: Date.now() }
-          });
-        }
-      } catch (error) {
-        // A permission may have been revoked between contains() and injection.
-        hostAccessGranted = false;
-        renderHostAccessState();
-        if (!quiet) throw error;
+      const currentHref = await getGrantedPageUrl(granted);
+      if (currentHref) {
+        href = currentHref;
+        parsed = parseQlikSenseUrl(href);
+        currentHostPattern = hostPermissionPattern(href);
+        await refreshHostAccessState();
+        await chrome.storage.session.set({ [SESSION_CONTEXT_KEY]: { ...granted, url: href, capturedAt: Date.now() } });
       }
     }
-
     pageContext = { ...parsed, tabId: granted.tabId, windowId: granted.windowId, url: href };
-
     if (parsed.appId) els.appIdInput.value = parsed.appId;
     if (parsed.sheetId) els.sheetIdInput.value = parsed.sheetId;
     els.virtualProxyInput.value = parsed.virtualProxyPath ?? "";
-
     if (parsed.isQlikSheet) {
-      const accessText = hostAccessGranted
-        ? "Acesso ao host concedido."
-        : "Clique em ‘Permitir acesso a este site’ antes de testar ou inspecionar.";
-      els.pageMessage.textContent = `Qlik detectado em ${parsed.origin}. App e sheet foram preenchidos pela URL. ${accessText}`;
+      els.pageMessage.textContent = `Qlik detectado em ${parsed.origin}. App, sheet e proxy virtual foram obtidos da URL.${hostAccessGranted ? " Acesso ao host concedido." : " Conceda acesso ao host antes de testar."}`;
       if (!quiet) showToast("App e sheet detectados pela URL atual.");
     } else {
-      els.pageMessage.textContent = "A URL atual não corresponde ao padrão /sense/app/.../sheet/.... Preencha os IDs manualmente ou abra uma sheet Qlik.";
+      els.pageMessage.textContent = "A URL atual não corresponde ao padrão de uma sheet Qlik. Abra a sheet correta ou informe os IDs manualmente.";
       if (!quiet) showToast("Sheet Qlik não detectada na URL atual.", "error");
     }
     return pageContext;
   } catch (error) {
-    pageContext = null;
-    currentHostPattern = null;
-    hostAccessGranted = false;
-    renderHostAccessState();
+    pageContext = null; currentHostPattern = null; hostAccessGranted = false; renderHostAccessState();
     els.pageMessage.textContent = permissionHint(error);
     if (!quiet) showToast(permissionHint(error), "error");
     throw error;
@@ -220,116 +165,57 @@ async function detectContext({ quiet = false } = {}) {
 function permissionHint(error) {
   const message = error?.message ?? String(error);
   if (/Nenhuma guia foi associada/i.test(message)) return message;
-  if (/HOST_PERMISSION_REQUIRED/i.test(message)) {
-    return "Conceda acesso ao host Qlik atual pelo botão ‘Permitir acesso a este site’.";
-  }
-  if (/Cannot access|manifest must request permission|permission|activeTab|chrome:\/\//i.test(message)) {
-    return "A extensão ainda não tem acesso ao host desta página. Clique em ‘Permitir acesso a este site’.";
-  }
-  if (/No tab with id|tab was closed/i.test(message)) {
-    return "A guia Qlik associada ao painel foi fechada. Abra a sheet e clique novamente no ícone da extensão.";
-  }
-  return message;
+  if (/HOST_PERMISSION_REQUIRED/i.test(message)) return "Conceda acesso ao host Qlik atual pelo botão ‘Permitir acesso a este site’.";
+  if (/Cannot access|manifest must request permission|permission|activeTab|chrome:\/\//i.test(message)) return "A extensão ainda não tem acesso ao host desta página. Clique em ‘Permitir acesso a este site’.";
+  if (/No tab with id|tab was closed/i.test(message)) return "A guia Qlik associada foi fechada. Abra a sheet e clique novamente no ícone da extensão.";
+  console.error(error);
+  return "Não foi possível concluir a operação no navegador. Consulte os detalhes técnicos no console da extensão.";
 }
-
 async function requireCurrentHostAccess(granted) {
   const pattern = hostPermissionPattern(granted.url);
-  if (!pattern) throw new Error("A guia associada não usa HTTP/HTTPS.");
-  const allowed = await chrome.permissions.contains({ origins: [pattern] });
-  if (!allowed) {
-    const error = new Error("HOST_PERMISSION_REQUIRED");
-    error.code = "HOST_PERMISSION_REQUIRED";
-    throw error;
+  if (!pattern) throw uiError("A guia associada não usa HTTP/HTTPS.");
+  if (!await chrome.permissions.contains({ origins: [pattern] })) {
+    const error = new Error("HOST_PERMISSION_REQUIRED"); error.code = "HOST_PERMISSION_REQUIRED"; throw error;
   }
   return pattern;
 }
-
 async function ensurePageCore(tabId) {
-  // Always inject the extension-owned bundle before each command. A user may
-  // have pasted another/stale QlikGeoJSONExtractor bundle into DevTools;
-  // reusing that global would make Side Panel behavior depend on page history.
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    files: ["core/qlik-geojson-extractor.js"]
-  });
+  await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["core/qlik-geojson-extractor.js"] });
 }
-
 async function executeQlikCommand(command, payload) {
   try {
     const api = globalThis.QlikGeoJSONExtractor;
-    if (!api?.QlikGeoJSONExtractor) {
-      throw new Error("Qlik GeoJSON core is not loaded in the page context.");
-    }
-
-    const connection = payload?.connection ?? {};
-    const extractor = new api.QlikGeoJSONExtractor(connection);
+    if (!api?.QlikGeoJSONExtractor) throw new Error("Qlik GeoJSON core is not loaded in the page context.");
+    const extractor = new api.QlikGeoJSONExtractor(payload?.connection ?? {});
     let value;
-
-    if (command === "probe") {
-      value = await extractor.probe(payload.options);
-    } else if (command === "inspect") {
-      value = await extractor.inspect(payload.options);
-    } else if (command === "extract") {
-      value = await extractor.extract(payload.options);
-    } else {
-      throw new Error(`Unsupported page command: ${command}`);
-    }
-
+    if (command === "probe") value = await extractor.probe(payload.options);
+    else if (command === "inspect") value = await extractor.inspect(payload.options);
+    else if (command === "extract") value = await extractor.extract(payload.options);
+    else throw new Error(`Unsupported page command: ${command}`);
     return { ok: true, value };
   } catch (error) {
-    return {
-      ok: false,
-      error: {
-        message: error?.message ?? String(error),
-        qlik: error?.qlik ?? null,
-        missing: error?.missing ?? null,
-        validation: error?.validation ?? null
-      }
-    };
+    const serialized = globalThis.QlikGeoJSONExtractor?.serializeError
+      ? globalThis.QlikGeoJSONExtractor.serializeError(error)
+      : { code: error?.code ?? null, params: error?.params ?? null, message: error?.message ?? String(error), qlik: error?.qlik ?? null, missing: error?.missing ?? null, validation: error?.validation ?? null };
+    return { ok: false, error: serialized };
   }
 }
-
 async function runQlik(command, options) {
   const granted = await getGrantedTabContext();
   await requireCurrentHostAccess(granted);
-
-  let currentUrl;
-  try {
-    currentUrl = await getGrantedPageUrl(granted);
-  } catch (error) {
-    throw new Error(
-      "A guia não pode ser acessada com a permissão de host atual. Se ela navegou para outro site, clique novamente no ícone da extensão nessa página e conceda o novo host."
-    );
-  }
-
-  const originalOrigin = new URL(granted.url).origin;
-  const currentOrigin = new URL(currentUrl).origin;
-  if (currentOrigin !== originalOrigin) {
-    throw new Error(
-      "A guia navegou para outra origem. Clique novamente no ícone da extensão nesta página e conceda acesso ao novo host."
-    );
-  }
-
+  const currentUrl = await getGrantedPageUrl(granted);
+  if (new URL(currentUrl).origin !== new URL(granted.url).origin) throw uiError("A guia navegou para outra origem. Clique novamente no ícone da extensão e conceda acesso ao novo host.");
   await ensurePageCore(granted.tabId);
-
   const injection = await chrome.scripting.executeScript({
-    target: { tabId: granted.tabId },
-    world: "MAIN",
-    func: executeQlikCommand,
-    args: [command, {
-      connection: {
-        virtualProxyPath: normalizedVirtualProxy()
-      },
-      options
-    }]
+    target: { tabId: granted.tabId }, world: "MAIN", func: executeQlikCommand,
+    args: [command, { connection: { virtualProxyPath: normalizedVirtualProxy() }, options }]
   });
-
   const response = injection?.[0]?.result;
-  if (!response) throw new Error("A página Qlik não retornou resultado para a extensão.");
+  if (!response) throw uiError("A página Qlik não retornou resultado para a extensão.");
   if (!response.ok) {
-    const error = new Error(response.error?.message ?? "Qlik operation failed.");
-    Object.assign(error, response.error ?? {});
+    const localized = localizeCoreError(response.error);
+    const error = new Error(localized.message);
+    Object.assign(error, response.error ?? {}, { technicalMessage: localized.technicalMessage });
     throw error;
   }
   return response.value;
@@ -340,740 +226,209 @@ function normalizedVirtualProxy() {
   if (!raw || raw === "/") return "";
   return `/${raw.replace(/^\/+|\/+$/g, "")}`;
 }
-
 function requiredIds() {
   const appId = els.appIdInput.value.trim();
   const sheetId = els.sheetIdInput.value.trim();
-  if (!appId) throw new Error("Informe o App ID.");
-  if (!sheetId) throw new Error("Informe o Sheet ID.");
+  if (!appId) throw uiError("Informe o ID do app.");
+  if (!sheetId) throw uiError("Informe o ID da sheet.");
   return { appId, sheetId };
 }
 
 async function probe() {
-  setBusy(els.probeButton, true, "Testando...");
-  setConnectionBadge("neutral", "testando");
+  setBusy(els.probeButton, true, "Testando..."); setConnectionBadge("neutral", "testando");
   try {
-    const ids = requiredIds();
-    const result = await runQlik("probe", ids);
-    els.probeOutput.textContent = pretty(result);
-    setVisible(els.probeOutput, true);
-    const success = result.websocket === "OPEN" && result.openDoc === "SUCCESS" &&
-      result.getSheet === "SUCCESS" && result.getFullPropertyTree === "SUCCESS";
+    const result = await runQlik("probe", requiredIds());
+    const display = { ...result };
+    if (result.error) {
+      const localized = localizeCoreError(result.error);
+      display.error = { code: result.error.code ?? null, parametros: result.error.params ?? null, mensagem: localized.message };
+      if (els.advancedModeInput.checked && result.error.message) display.error.detalheTecnico = result.error.message;
+    }
+    els.probeOutput.textContent = pretty(display); setVisible(els.probeOutput, true);
+    const success = result.websocket === "OPEN" && result.openDoc === "SUCCESS" && result.getSheet === "SUCCESS" && result.getFullPropertyTree === "SUCCESS";
     setConnectionBadge(success ? "success" : "error", success ? "conectado" : "falha");
-    if (!success) showToast("O probe retornou uma falha. Veja os detalhes.", "error");
-    else showToast("Conexão Qlik validada.");
-  } catch (error) {
-    setConnectionBadge("error", "falha");
-    els.probeOutput.textContent = permissionHint(error);
-    setVisible(els.probeOutput, true);
-    showToast(permissionHint(error), "error");
-  } finally {
-    setBusy(els.probeButton, false);
-  }
+    showToast(success ? "Conexão Qlik validada." : (result.error ? localizeCoreError(result.error).message : "O teste de conexão retornou uma falha."), success ? "success" : "error");
+  } catch (error) { setConnectionBadge("error", "falha"); els.probeOutput.textContent = friendlyError(error); setVisible(els.probeOutput, true); showToast(friendlyError(error), "error"); }
+  finally { setBusy(els.probeButton, false); }
 }
 
 async function inspect() {
-  setBusy(els.inspectButton, true, "Inspecionando...");
-  currentResult = null;
-  setVisible(els.downloadButton, false);
+  setBusy(els.inspectButton, true, "Inspecionando..."); currentResult = null; currentDiagnosticReport = null;
+  setVisible(els.downloadButton, false); setVisible(els.downloadDiagnosticButton, false);
   try {
-    const ids = requiredIds();
-    inspectionReport = await runQlik("inspect", ids);
-    if (!inspectionReport.pointLayers?.length) {
-      throw new Error("Nenhum PointLayer foi encontrado nesta sheet.");
-    }
-    selectedProperties.clear();
-    customProperties = [];
-    measures = [];
-    renderCustomProperties();
-    renderMeasures();
-    renderLayerSelect();
-    renderFieldList();
-    setVisible(els.inspectionSection, true);
-    setVisible(els.propertiesSection, true);
-    setVisible(els.customPropertiesSection, true);
-    setVisible(els.measuresSection, true);
-    setVisible(els.optionsSection, true);
-    setVisible(els.extractSection, true);
-    await refreshSavedConfigAvailability();
-    showToast(`${inspectionReport.pointLayers.length} PointLayer(s) encontrado(s). Escolha a chave da entidade.`);
-  } catch (error) {
-    showToast(permissionHint(error), "error");
-  } finally {
-    setBusy(els.inspectButton, false);
-  }
+    inspectionReport = await runQlik("inspect", requiredIds());
+    if (!inspectionReport.pointLayers?.length) throw uiError("Nenhum PointLayer foi encontrado nesta sheet.");
+    selectedProperties.clear(); customProperties = []; measures = [];
+    renderLayerSelect(); renderFieldList(); renderCustomProperties(); renderMeasures();
+    for (const section of [els.inspectionSection, els.propertiesSection, els.customPropertiesSection, els.measuresSection, els.optionsSection, els.extractSection]) setVisible(section, true);
+    await refreshSavedConfigAvailability(); updateReadiness();
+    showToast(`${inspectionReport.pointLayers.length} PointLayer(s) encontrado(s). Revise as coordenadas e escolha a chave da entidade.`);
+  } catch (error) { showToast(friendlyError(error), "error"); }
+  finally { setBusy(els.inspectButton, false); }
 }
 
+function selectedLayerIndex() { const value = Number(els.layerSelect.value); return Number.isInteger(value) ? value : 0; }
+function layerDiagnostic(index) {
+  const layer = inspectionReport?.pointLayers?.[index];
+  return inspectionReport?.diagnostics?.find((item) => item.objectId === layer?.objectId && item.layerId === layer?.layerId) ?? inspectionReport?.diagnostics?.[index] ?? null;
+}
+function layerSuggestions(index) {
+  const layer = inspectionReport?.pointLayers?.[index];
+  return inspectionReport?.entityKeySuggestions?.find((item) => item.objectId === layer?.objectId && item.layerId === layer?.layerId)?.candidates ?? inspectionReport?.entityKeySuggestions?.[index]?.candidates ?? [];
+}
 function renderLayerSelect() {
   els.layerSelect.textContent = "";
   inspectionReport.pointLayers.forEach((layer, index) => {
-    const option = document.createElement("option");
-    option.value = String(index);
-    option.textContent = `${layer.objectId ?? "objeto"} / ${layer.layerId ?? `layer-${layer.layerIndex}`}`;
-    els.layerSelect.append(option);
+    const option = document.createElement("option"); option.value = String(index); option.textContent = `${layer.objectId ?? "objeto"} / ${layer.layerId ?? `camada-${layer.layerIndex}`}`; els.layerSelect.append(option);
   });
-  els.layerSelect.value = "0";
-  applyLayer(0);
+  els.layerSelect.value = "0"; applyLayer(0);
 }
-
-function selectedLayerIndex() {
-  const value = Number(els.layerSelect.value);
-  return Number.isInteger(value) ? value : 0;
-}
-
-function renderCoordinateSelect(select, detectedField, label) {
+function renderCoordinateSelect(select, definition, label) {
   select.textContent = "";
-  const groups = coordinateFieldGroups(inspectionReport?.fields ?? [], detectedField);
-
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = `Escolha o campo de ${label.toLowerCase()}...`;
-  select.append(placeholder);
-
-  const used = new Set();
-  if (groups.detected) {
-    const group = document.createElement("optgroup");
-    group.label = "Detectado no PointLayer";
-    const option = document.createElement("option");
-    option.value = groups.detected.name;
-    option.textContent = `${groups.detected.name} · cardinalidade ${groups.detected.cardinality ?? "?"}`;
-    group.append(option);
-    select.append(group);
-    used.add(groups.detected.name);
-  } else if (detectedField) {
-    const group = document.createElement("optgroup");
-    group.label = "Expressão detectada (não é campo direto)";
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = `${detectedField} · escolha abaixo um campo real do app`;
-    option.disabled = true;
-    group.append(option);
-    select.append(group);
+  const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = `Escolha ${label.toLowerCase()}...`; select.append(placeholder);
+  const detectedValue = encodeCoordinateSelection(definition);
+  if (detectedValue) {
+    const group = document.createElement("optgroup"); group.label = "Detectado no PointLayer";
+    const option = document.createElement("option"); option.value = detectedValue;
+    option.textContent = definition.kind === "field" ? `${definition.field} · campo direto` : `${definition.raw} · expressão Qlik`;
+    group.append(option); select.append(group);
   }
-
-  if (groups.numeric.length) {
-    const group = document.createElement("optgroup");
-    group.label = "Campos numéricos";
-    for (const field of groups.numeric) {
-      const option = document.createElement("option");
-      option.value = field.name;
-      option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`;
-      group.append(option);
-      used.add(field.name);
+  const groups = coordinateFieldGroups(inspectionReport?.fields ?? [], definition?.field ?? "");
+  if (groups.numeric.length || groups.detected) {
+    const group = document.createElement("optgroup"); group.label = "Campos numéricos";
+    const fields = groups.detected ? [groups.detected, ...groups.numeric] : groups.numeric;
+    const seen = new Set();
+    for (const field of fields) {
+      if (seen.has(field.name)) continue; seen.add(field.name);
+      const option = document.createElement("option"); option.value = `field:${encodeURIComponent(field.name)}`; option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`; group.append(option);
     }
     select.append(group);
   }
-
-  if (groups.other.length) {
-    const group = document.createElement("optgroup");
-    group.label = "Outros campos";
-    for (const field of groups.other) {
-      if (used.has(field.name)) continue;
-      const option = document.createElement("option");
-      option.value = field.name;
-      option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`;
-      group.append(option);
-    }
-    select.append(group);
-  }
-
-  select.value = groups.detected?.name ?? "";
+  select.value = detectedValue || "";
 }
-
 function applyLayer(index) {
-  const layer = inspectionReport.pointLayers[index];
-  if (!layer) return;
-  renderCoordinateSelect(els.latitudeInput, layer.locationOrLatitude ?? "", "Latitude");
-  renderCoordinateSelect(els.longitudeInput, layer.longitude ?? "", "Longitude");
-  renderDiagnostic(index);
-  renderEntityOptions(index);
-  updateEffectiveConfigPreview();
+  const layer = inspectionReport?.pointLayers?.[index]; if (!layer) return;
+  renderCoordinateSelect(els.latitudeInput, layer.latitudeDefinition, "Latitude");
+  renderCoordinateSelect(els.longitudeInput, layer.longitudeDefinition, "Longitude");
+  renderDiagnostic(index); renderEntityOptions(index); renderFieldList(); updateEffectiveConfigPreview(); updateReadiness();
 }
-
-function layerDiagnostic(index) {
-  const layer = inspectionReport.pointLayers[index];
-  return inspectionReport.diagnostics?.find((item) =>
-    item.objectId === layer?.objectId && item.layerId === layer?.layerId
-  ) ?? inspectionReport.diagnostics?.[index] ?? null;
-}
-
-function layerSuggestions(index) {
-  const layer = inspectionReport.pointLayers[index];
-  return inspectionReport.entityKeySuggestions?.find((item) =>
-    item.objectId === layer?.objectId && item.layerId === layer?.layerId
-  )?.candidates ?? inspectionReport.entityKeySuggestions?.[index]?.candidates ?? [];
-}
-
 function renderDiagnostic(index) {
-  const diagnostic = layerDiagnostic(index);
-  const layer = inspectionReport.pointLayers[index];
-  els.layerDiagnostic.textContent = "";
-
+  const diagnostic = layerDiagnostic(index); const layer = inspectionReport.pointLayers[index]; els.layerDiagnostic.textContent = "";
   const rows = [
-    ["Latitude", `${diagnostic?.latitudeField ?? layer?.locationOrLatitude ?? "?"} · cardinalidade ${diagnostic?.latitudeCardinality ?? "?"}`],
-    ["Longitude", `${diagnostic?.longitudeField ?? layer?.longitude ?? "?"} · cardinalidade ${diagnostic?.longitudeCardinality ?? "?"}`],
-    ["Dimensão visual", (diagnostic?.visualDimensions ?? []).map((d) => `${d.field} (${d.cardinality ?? "?"})`).join(", ") || "não identificada"]
+    ["Latitude", diagnostic?.latitudeDefinition?.field ?? diagnostic?.latitudeDefinition?.raw ?? layer.locationOrLatitude ?? "?"],
+    ["Longitude", diagnostic?.longitudeDefinition?.field ?? diagnostic?.longitudeDefinition?.raw ?? layer.longitude ?? "?"],
+    ["Dimensão visual", (diagnostic?.visualDimensions ?? []).map((d) => `${d.field} (${d.cardinality ?? "?"})`).join(", ") || "não identificada"],
+    ["Pares distintos", diagnostic?.coordinateStats?.distinctPairs ?? diagnostic?.coordinateCardinality ?? "?"]
   ];
-
   for (const [label, value] of rows) {
-    const row = document.createElement("div");
-    row.className = "diagnostic-row";
-    const left = document.createElement("span");
-    left.textContent = label;
-    const right = document.createElement("strong");
-    right.textContent = value;
-    row.append(left, right);
-    els.layerDiagnostic.append(row);
+    const row = document.createElement("div"); row.className = "diagnostic-row"; const left = document.createElement("span"); left.textContent = label; const right = document.createElement("strong"); right.textContent = String(value); row.append(left, right); els.layerDiagnostic.append(row);
   }
-
-  for (const warning of diagnostic?.warnings ?? []) {
-    const box = document.createElement("div");
-    box.className = "warning";
-    box.textContent = warning;
-    els.layerDiagnostic.append(box);
+  const stats = diagnostic?.coordinateStats;
+  if (stats?.available) {
+    const grid = document.createElement("div"); grid.className = "diagnostic-stats";
+    for (const [name, value] of [
+      ["Latitude mín./máx.", `${stats.latitude.min ?? "?"} / ${stats.latitude.max ?? "?"}`],
+      ["Longitude mín./máx.", `${stats.longitude.min ?? "?"} / ${stats.longitude.max ?? "?"}`],
+      ["Latitudes distintas", stats.latitude.distinct ?? "?"],
+      ["Longitudes distintas", stats.longitude.distinct ?? "?"]
+    ]) { const item = document.createElement("div"); item.className = "diagnostic-stat"; item.innerHTML = `<span>${name}</span><strong></strong>`; item.querySelector("strong").textContent = String(value); grid.append(item); }
+    els.layerDiagnostic.append(grid);
   }
+  for (const warning of diagnostic?.warnings ?? []) { const box = document.createElement("div"); box.className = "warning"; box.textContent = localizeDiagnostic(warning); els.layerDiagnostic.append(box); }
 }
-
 function renderEntityOptions(index, wantedValue = "") {
-  const suggestions = layerSuggestions(index);
-  const fields = inspectionReport.fields ?? [];
-  els.entityKeySelect.textContent = "";
-
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "Escolha explicitamente...";
-  els.entityKeySelect.append(placeholder);
-
+  const suggestions = layerSuggestions(index); const fields = inspectionReport.fields ?? []; els.entityKeySelect.textContent = "";
+  const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Escolha explicitamente..."; els.entityKeySelect.append(placeholder);
   const used = new Set();
   if (suggestions.length) {
-    const group = document.createElement("optgroup");
-    group.label = "Candidatos sugeridos";
+    const group = document.createElement("optgroup"); group.label = "Candidatos sugeridos";
     for (const item of suggestions) {
-      const option = document.createElement("option");
-      option.value = item.field;
-      option.textContent = `${item.field} · cardinalidade ${item.cardinality ?? "?"} · score ${item.score}`;
-      group.append(option);
-      used.add(item.field);
+      const option = document.createElement("option"); option.value = item.field; option.textContent = `${item.field} · confiança ${confidenceLabel(item.confidence)} · cardinalidade ${item.cardinality ?? "?"}`; group.append(option); used.add(item.field);
     }
     els.entityKeySelect.append(group);
   }
-
-  const allGroup = document.createElement("optgroup");
-  allGroup.label = "Todos os campos";
-  [...fields]
-    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
-    .forEach((field) => {
-      if (used.has(field.name)) return;
-      const option = document.createElement("option");
-      option.value = field.name;
-      option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`;
-      allGroup.append(option);
-    });
+  const allGroup = document.createElement("optgroup"); allGroup.label = "Todos os campos";
+  [...fields].sort((a,b) => a.name.localeCompare(b.name,"pt-BR")).forEach((field) => { if (used.has(field.name)) return; const option = document.createElement("option"); option.value = field.name; option.textContent = `${field.name} · cardinalidade ${field.cardinality ?? "?"}`; allGroup.append(option); });
   els.entityKeySelect.append(allGroup);
-
-  if (wantedValue && fields.some((field) => field.name === wantedValue)) {
-    els.entityKeySelect.value = wantedValue;
-  } else {
-    els.entityKeySelect.value = "";
-  }
+  els.entityKeySelect.value = wantedValue && fields.some((field) => field.name === wantedValue) ? wantedValue : "";
+  renderEntityAssessment();
+}
+function renderEntityAssessment() {
+  els.entityKeyAssessment.textContent = "";
+  const selected = els.entityKeySelect.value; if (!selected) return;
+  const candidate = layerSuggestions(selectedLayerIndex()).find((item) => item.field === selected);
+  if (!candidate) { els.entityKeyAssessment.textContent = "Campo escolhido manualmente; não houve análise espacial detalhada para este candidato."; return; }
+  const card = document.createElement("div"); card.className = "candidate-card";
+  const title = document.createElement("strong"); title.textContent = `Confiança ${confidenceLabel(candidate.confidence)} · pontuação ${candidate.score}`; title.className = `confidence-${candidate.confidence}`; card.append(title);
+  const list = document.createElement("ul");
+  for (const evidence of candidate.evidence ?? []) { const li = document.createElement("li"); li.textContent = `${localizeEvidence(evidence)} (${evidence.weight > 0 ? "+" : ""}${evidence.weight})`; list.append(li); }
+  card.append(list); els.entityKeyAssessment.append(card);
 }
 
+function visibleFields() { return fieldsMatchingQuery(inspectionReport?.fields ?? [], els.fieldSearchInput.value); }
 function renderFieldList() {
-  if (!inspectionReport) return;
-  const query = els.fieldSearchInput.value.trim().toLocaleLowerCase("pt-BR");
-  els.fieldList.textContent = "";
-
-  const visibleFields = inspectionReport.fields
-    .filter((field) => {
-      if (!query) return true;
-      const haystack = `${field.name} ${(field.sourceTables ?? []).join(" ")}`.toLocaleLowerCase("pt-BR");
-      return haystack.includes(query);
-    })
-    .sort((a, b) => {
-      const aSelected = selectedProperties.has(a.name) ? 0 : 1;
-      const bSelected = selectedProperties.has(b.name) ? 0 : 1;
-      return aSelected - bSelected || a.name.localeCompare(b.name, "pt-BR");
-    });
-
-  for (const field of visibleFields) {
-    const row = document.createElement("div");
-    row.className = "field-row";
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = selectedProperties.has(field.name);
-    checkbox.setAttribute("aria-label", `Selecionar ${field.name}`);
-
-    const label = document.createElement("label");
-    const name = document.createElement("div");
-    name.className = "field-name";
-    name.textContent = field.name;
-    const meta = document.createElement("div");
-    meta.className = "field-meta";
-    meta.textContent = `card. ${field.cardinality ?? "?"}${field.sourceTables?.length ? ` · ${field.sourceTables.join(", ")}` : ""}`;
-    label.append(name, meta);
-
-    const select = document.createElement("select");
-    for (const [value, text] of aggregations) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = text;
-      select.append(option);
-    }
-    select.value = selectedProperties.get(field.name) ?? "only";
-    select.disabled = !checkbox.checked;
-
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) selectedProperties.set(field.name, select.value);
-      else selectedProperties.delete(field.name);
-      select.disabled = !checkbox.checked;
-      updateSelectedPropertyCount();
-      updateEffectiveConfigPreview();
-    });
-    select.addEventListener("change", () => {
-      if (checkbox.checked) selectedProperties.set(field.name, select.value);
-      updateEffectiveConfigPreview();
-    });
-
-    row.append(checkbox, label, select);
-    els.fieldList.append(row);
+  if (!inspectionReport) return; els.fieldList.textContent = "";
+  const fields = visibleFields().sort((a,b) => (selectedProperties.has(a.name)?0:1) - (selectedProperties.has(b.name)?0:1) || a.name.localeCompare(b.name,"pt-BR"));
+  for (const field of fields) {
+    const row = document.createElement("div"); row.className = "field-row";
+    const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = selectedProperties.has(field.name); checkbox.setAttribute("aria-label", `Selecionar ${field.name}`);
+    const label = document.createElement("label"); const name = document.createElement("div"); name.className="field-name"; name.textContent=field.name; const meta=document.createElement("div"); meta.className="field-meta"; meta.textContent=`card. ${field.cardinality ?? "?"}${field.sourceTables?.length ? ` · ${field.sourceTables.join(", ")}` : ""}`; label.append(name,meta);
+    const select=document.createElement("select"); for(const [value,text] of aggregations){const option=document.createElement("option");option.value=value;option.textContent=text;select.append(option);} select.value=selectedProperties.get(field.name)??"only"; select.disabled=!checkbox.checked;
+    checkbox.addEventListener("change",()=>{ if(checkbox.checked)selectedProperties.set(field.name,select.value);else selectedProperties.delete(field.name);select.disabled=!checkbox.checked;updateSelectedPropertyCount();updateEffectiveConfigPreview();updateReadiness(); });
+    select.addEventListener("change",()=>{if(checkbox.checked)selectedProperties.set(field.name,select.value);updateEffectiveConfigPreview();});
+    row.append(checkbox,label,select); els.fieldList.append(row);
   }
-
-  if (!visibleFields.length) {
-    const empty = document.createElement("p");
-    empty.className = "hint";
-    empty.textContent = "Nenhum campo corresponde ao filtro.";
-    els.fieldList.append(empty);
-  }
-
-  updateSelectedPropertyCount();
+  if(!fields.length){const p=document.createElement("p");p.className="hint";p.textContent="Nenhum campo corresponde ao filtro.";els.fieldList.append(p);} updateSelectedPropertyCount();
 }
+function updateSelectedPropertyCount(){els.selectedPropertyCount.textContent=`${selectedProperties.size} selecionada${selectedProperties.size===1?"":"s"}`;els.bulkWarning.textContent=selectedProperties.size>100?"Muitos campos selecionados podem gerar um hypercube pesado e incluir dados desnecessários.":"";}
+function selectFiltered(){const fields=visibleFields();if(fields.length>100&&!confirm(`Selecionar ${fields.length} campos filtrados pode gerar uma consulta grande. Continuar?`))return;for(const field of fields)if(!selectedProperties.has(field.name))selectedProperties.set(field.name,"only");renderFieldList();updateEffectiveConfigPreview();}
+function selectRelated(){const lat=decodeCoordinateSelection(els.latitudeInput.value).field;const lon=decodeCoordinateSelection(els.longitudeInput.value).field;const fields=relatedFields(inspectionReport?.fields??[],els.entityKeySelect.value,lat,lon);for(const field of fields)if(!selectedProperties.has(field.name))selectedProperties.set(field.name,"only");renderFieldList();updateEffectiveConfigPreview();showToast(`${fields.length} campo(s) relacionado(s) selecionado(s).`);}
+function clearProperties(){selectedProperties.clear();renderFieldList();updateEffectiveConfigPreview();}
+function applyBulk(){selectedProperties=applyBulkAggregation(selectedProperties,els.bulkAggregationSelect.value);renderFieldList();updateEffectiveConfigPreview();showToast("Agregação aplicada aos campos selecionados.");}
 
-function updateSelectedPropertyCount() {
-  els.selectedPropertyCount.textContent = `${selectedProperties.size} selecionada${selectedProperties.size === 1 ? "" : "s"}`;
+function addCustomProperty(property={label:"",expression:""}){customProperties.push({id:crypto.randomUUID(),...property});renderCustomProperties();updateEffectiveConfigPreview();}
+function renderCustomProperties(){els.customPropertyList.textContent="";for(const property of customProperties){const row=document.createElement("div");row.className="measure-row";const l=document.createElement("label");l.textContent="Rótulo";const li=document.createElement("input");li.value=property.label;li.addEventListener("input",()=>{property.label=li.value;updateEffectiveConfigPreview();});l.append(li);const e=document.createElement("label");e.textContent="Expressão Qlik";const ei=document.createElement("input");ei.value=property.expression;ei.addEventListener("input",()=>{property.expression=ei.value;updateEffectiveConfigPreview();});e.append(ei);const a=document.createElement("div");a.className="measure-actions";const r=document.createElement("button");r.type="button";r.className="remove-measure";r.textContent="Remover";r.addEventListener("click",()=>{customProperties=customProperties.filter((x)=>x.id!==property.id);renderCustomProperties();updateEffectiveConfigPreview();});a.append(r);row.append(l,e,a);els.customPropertyList.append(row);}}
+function addMeasure(measure={label:"",expression:""}){measures.push({id:crypto.randomUUID(),...measure});renderMeasures();updateEffectiveConfigPreview();}
+function renderMeasures(){els.measureList.textContent="";for(const measure of measures){const row=document.createElement("div");row.className="measure-row";const l=document.createElement("label");l.textContent="Rótulo";const li=document.createElement("input");li.value=measure.label;li.addEventListener("input",()=>{measure.label=li.value;updateEffectiveConfigPreview();});l.append(li);const e=document.createElement("label");e.textContent="Expressão Qlik";const ei=document.createElement("input");ei.value=measure.expression;ei.addEventListener("input",()=>{measure.expression=ei.value;updateEffectiveConfigPreview();});e.append(ei);const a=document.createElement("div");a.className="measure-actions";const r=document.createElement("button");r.type="button";r.className="remove-measure";r.textContent="Remover";r.addEventListener("click",()=>{measures=measures.filter((x)=>x.id!==measure.id);renderMeasures();updateEffectiveConfigPreview();});a.append(r);row.append(l,e,a);els.measureList.append(row);}}
+
+function parseOverrides(){const text=els.coordinateOverridesInput.value.trim();if(!text)return undefined;try{const parsed=JSON.parse(text);if(!parsed||Array.isArray(parsed)||typeof parsed!=="object")throw new Error();return parsed;}catch(error){throw uiError("O JSON de correções de coordenadas é inválido.", error.message);}}
+function buildExtractionConfig(){
+  const {appId}=requiredIds();const entityKey=els.entityKeySelect.value;if(!entityKey)throw uiError("Escolha explicitamente a chave da entidade física.");
+  const lat=decodeCoordinateSelection(els.latitudeInput.value);const lon=decodeCoordinateSelection(els.longitudeInput.value);if(!(lat.field||lat.expression))throw uiError("Escolha a latitude.");if(!(lon.field||lon.expression))throw uiError("Escolha a longitude.");
+  const validMeasures=measures.map(({label,expression})=>({label:label.trim(),expression:expression.trim()})).filter((x)=>x.label||x.expression);for(const m of validMeasures)if(!m.label||!m.expression)throw uiError("Toda medida deve possuir rótulo e expressão Qlik.");
+  const config={appId,name:els.datasetNameInput.value.trim()||"qlik_points",entityKey,properties:buildPropertyDefinitions([...selectedProperties.entries()],customProperties),measures:validMeasures,navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim()||"coordinate_source",coordinateSourceValue:els.coordinateSourceValueInput.value.trim()||"Qlik",coordinateOverrides:parseOverrides()};
+  if(lat.field)config.latitudeField=lat.field;else config.latitudeExpression=lat.expression;if(lon.field)config.longitudeField=lon.field;else config.longitudeExpression=lon.expression;return config;
 }
+function updateEffectiveConfigPreview(){if(!els.effectiveConfigOutput)return;try{if(!inspectionReport){els.effectiveConfigOutput.textContent="Inspecione a sheet para montar a configuração.";return;}els.effectiveConfigOutput.textContent=pretty(buildExtractionConfig());}catch(error){els.effectiveConfigOutput.textContent=`Configuração incompleta: ${friendlyError(error)}`;}updateReadiness();}
+function updateReadiness(){if(!els.readinessPanel)return;els.readinessPanel.textContent="";const items=[];const diag=layerDiagnostic(selectedLayerIndex());const warnings=diag?.warnings??[];items.push({state:inspectionReport?"ok":"warn",text:inspectionReport?"PointLayer inspecionado.":"Inspecione a sheet."});items.push({state:(els.latitudeInput.value&&els.longitudeInput.value)?"ok":"warn",text:(els.latitudeInput.value&&els.longitudeInput.value)?"Latitude e longitude definidas.":"Defina latitude e longitude."});items.push({state:els.entityKeySelect.value?"ok":"warn",text:els.entityKeySelect.value?`Chave física: ${els.entityKeySelect.value}.`:"Escolha a chave da entidade física."});if(warnings.some((w)=>w.severity==="error"))items.push({state:"error",text:"Há erro no diagnóstico das coordenadas."});else if(warnings.length)items.push({state:"warn",text:`${warnings.length} aviso(s) no diagnóstico do mapa.`});else if(inspectionReport)items.push({state:"ok",text:"Sem avisos estruturais no PointLayer."});for(const item of items){const div=document.createElement("div");div.className=`readiness-item ${item.state}`;div.textContent=item.text;els.readinessPanel.append(div);}}
 
-function addCustomProperty(property = { label: "", expression: "" }) {
-  customProperties.push({
-    id: crypto.randomUUID(),
-    label: property.label ?? "",
-    expression: property.expression ?? ""
-  });
-  renderCustomProperties();
-  updateEffectiveConfigPreview();
-}
+async function extract(){setBusy(els.extractButton,true,"Extraindo...");els.extractStatus.textContent="Criando hypercube e buscando todas as linhas...";currentResult=null;currentDiagnosticReport=null;setVisible(els.downloadButton,false);setVisible(els.downloadDiagnosticButton,false);resetResultPanels();try{const config=buildExtractionConfig();if(els.effectiveConfigOutput)els.effectiveConfigOutput.textContent=pretty(config);currentResult=await runQlik("extract",config);renderResult(currentResult);const health=extractionHealth(currentResult);els.extractStatus.textContent=health.message;els.extractStatus.dataset.state=health.level;setVisible(els.downloadButton,health.allowDownload);currentDiagnosticReport=buildDiagnosticReport({inspectionReport,layerIndex:selectedLayerIndex(),config,result:currentResult});setVisible(els.downloadDiagnosticButton,true);showToast(health.message,health.level==="success"?"success":"error");}catch(error){els.extractStatus.textContent=friendlyError(error);els.extractStatus.dataset.state="error";if(Array.isArray(error.missing)&&error.missing.length){els.missingOutput.textContent=pretty(error.missing);setVisible(els.missingDetails,true);}showToast(friendlyError(error),"error");}finally{setBusy(els.extractButton,false);}}
+function resetResultPanels(){for(const el of [els.resultSummary,els.missingDetails,els.skippedDetails,els.previewDetails])setVisible(el,false);els.resultSummary.textContent="";els.missingOutput.textContent="";els.skippedOutput.textContent="";els.previewOutput.textContent="";}
+function renderResult(result){const summary=[[result.rowCount??0,"linhas Qlik"],[result.featureCount??0,"feições"],[result.uniqueKeys??0,"chaves únicas"],[result.missing?.length??0,"sem coordenadas"],[result.skippedNullEntityCount??0,"linhas nulas ignoradas"],[result.appliedOverrides?.length??0,"correções aplicadas"]];els.resultSummary.textContent="";for(const [value,label] of summary){const item=document.createElement("div");item.className="summary-item";const strong=document.createElement("strong");strong.textContent=String(value);const span=document.createElement("span");span.textContent=label;item.append(strong,span);els.resultSummary.append(item);}setVisible(els.resultSummary,true);if(result.missing?.length){els.missingOutput.textContent=pretty(result.missing);setVisible(els.missingDetails,true);}if(result.skippedNullEntities?.length){els.skippedOutput.textContent=pretty(result.skippedNullEntities);setVisible(els.skippedDetails,true);}els.previewOutput.textContent=pretty(result.featureCollection?.features?.slice(0,10)??[]);setVisible(els.previewDetails,true);}
+async function downloadJsonData(data,filename,mime){const blob=new Blob([pretty(data)],{type:mime});const url=URL.createObjectURL(blob);try{await chrome.downloads.download({url,filename,saveAs:true});}finally{setTimeout(()=>URL.revokeObjectURL(url),30000);}}
+async function downloadResult(){if(!currentResult?.featureCollection){showToast("Gere o GeoJSON antes de baixar.","error");return;}const base=safeFilename(els.datasetNameInput.value,"qlik_points");await downloadJsonData(currentResult.featureCollection,base.toLowerCase().endsWith(".geojson")?base:`${base}.geojson`,"application/geo+json;charset=utf-8");showToast("Download do GeoJSON iniciado.");}
+async function downloadDiagnostic(){if(!currentDiagnosticReport){showToast("Execute uma extração para gerar o relatório de diagnóstico.","error");return;}const base=safeFilename(els.datasetNameInput.value,"qlik_points");await downloadJsonData(currentDiagnosticReport,`${base}_diagnostico.json`,"application/json;charset=utf-8");showToast("Download do relatório de diagnóstico iniciado.");}
 
-function renderCustomProperties() {
-  els.customPropertyList.textContent = "";
-  for (const property of customProperties) {
-    const row = document.createElement("div");
-    row.className = "measure-row";
+async function currentStorageIdentity(){const granted=await getGrantedTabContext();const parsed=parseQlikSenseUrl(pageContext?.url??granted.url);return{origin:parsed.origin??pageContext?.origin,appId:els.appIdInput.value.trim(),sheetId:els.sheetIdInput.value.trim()};}
+function serializableUiConfig(){return normalizeSavedConfig({layerIndex:selectedLayerIndex(),latitudeSelection:els.latitudeInput.value,longitudeSelection:els.longitudeInput.value,entityKey:els.entityKeySelect.value,properties:[...selectedProperties.entries()].map(([field,aggregation])=>({field,aggregation})),customProperties:customProperties.map(({label,expression})=>({label,expression})),measures:measures.map(({label,expression})=>({label,expression})),datasetName:els.datasetNameInput.value.trim(),navigationLinks:els.navigationLinksInput.checked,requireAllCoordinates:els.requireAllCoordinatesInput.checked,skipNullEntities:els.skipNullEntitiesInput.checked,coordinateSourceField:els.coordinateSourceFieldInput.value.trim(),coordinateSourceValue:els.coordinateSourceValueInput.value.trim(),coordinateOverrides:els.coordinateOverridesInput.value.trim(),virtualProxyPath:normalizedVirtualProxy(),advancedMode:els.advancedModeInput.checked});}
+async function saveConfig(){if(!inspectionReport){showToast("Inspecione a sheet antes de salvar a configuração.","error");return;}const key=configStorageKey(await currentStorageIdentity());if(!key){showToast("Não foi possível identificar app/sheet para salvar.","error");return;}await chrome.storage.local.set({[key]:serializableUiConfig()});showToast("Configuração salva localmente no Chrome.");}
+async function loadConfig(){if(!inspectionReport){showToast("Inspecione a sheet antes de carregar a configuração.","error");return;}const key=configStorageKey(await currentStorageIdentity());if(!key)return;const raw=(await chrome.storage.local.get(key))[key];if(!raw){showToast("Nenhuma configuração salva para este app/sheet.","error");return;}const stored=normalizeSavedConfig(raw);const layerIndex=inspectionReport.pointLayers[stored.layerIndex]?stored.layerIndex:0;els.layerSelect.value=String(layerIndex);applyLayer(layerIndex);if([...els.latitudeInput.options].some((o)=>o.value===stored.latitudeSelection))els.latitudeInput.value=stored.latitudeSelection;if([...els.longitudeInput.options].some((o)=>o.value===stored.longitudeSelection))els.longitudeInput.value=stored.longitudeSelection;renderEntityOptions(layerIndex,stored.entityKey);selectedProperties=new Map(stored.properties.filter((item)=>inspectionReport.fields.some((f)=>f.name===item.field)).map((item)=>[item.field,item.aggregation]));customProperties=stored.customProperties.map((item)=>({id:crypto.randomUUID(),...item}));measures=stored.measures.map((item)=>({id:crypto.randomUUID(),...item}));els.datasetNameInput.value=stored.datasetName;els.navigationLinksInput.checked=stored.navigationLinks;els.requireAllCoordinatesInput.checked=stored.requireAllCoordinates;els.skipNullEntitiesInput.checked=stored.skipNullEntities;els.coordinateSourceFieldInput.value=stored.coordinateSourceField;els.coordinateSourceValueInput.value=stored.coordinateSourceValue;els.coordinateOverridesInput.value=stored.coordinateOverrides;els.virtualProxyInput.value=stored.virtualProxyPath;setAdvancedMode(stored.advancedMode);renderFieldList();renderCustomProperties();renderMeasures();renderEntityAssessment();updateEffectiveConfigPreview();showToast("Configuração carregada.");}
+async function clearConfig(){const key=configStorageKey(await currentStorageIdentity());if(!key)return;await chrome.storage.local.remove(key);showToast("Configuração salva removida.");await refreshSavedConfigAvailability();}
+async function refreshSavedConfigAvailability(){try{const key=configStorageKey(await currentStorageIdentity());const exists=key?Boolean((await chrome.storage.local.get(key))[key]):false;els.loadConfigButton.disabled=!exists;els.clearConfigButton.disabled=!exists;}catch{els.loadConfigButton.disabled=true;els.clearConfigButton.disabled=true;}}
 
-    const labelField = document.createElement("label");
-    labelField.textContent = "Rótulo da propriedade";
-    const labelInput = document.createElement("input");
-    labelInput.value = property.label;
-    labelInput.placeholder = "LABEL";
-    labelInput.addEventListener("input", () => {
-      property.label = labelInput.value;
-      updateEffectiveConfigPreview();
-    });
-    labelField.append(labelInput);
+els.hostAccessButton.addEventListener("click",requestOrRemoveCurrentHostAccess);
+els.detectButton.addEventListener("click",()=>void detectContext());
+els.probeButton.addEventListener("click",()=>void probe());
+els.inspectButton.addEventListener("click",()=>void inspect());
+els.layerSelect.addEventListener("change",()=>applyLayer(selectedLayerIndex()));
+els.latitudeInput.addEventListener("change",updateEffectiveConfigPreview);els.longitudeInput.addEventListener("change",updateEffectiveConfigPreview);
+els.entityKeySelect.addEventListener("change",()=>{renderEntityAssessment();renderFieldList();updateEffectiveConfigPreview();updateReadiness();});
+els.fieldSearchInput.addEventListener("input",renderFieldList);
+els.selectFilteredButton.addEventListener("click",selectFiltered);els.selectRelatedButton.addEventListener("click",selectRelated);els.clearPropertiesButton.addEventListener("click",clearProperties);els.applyBulkAggregationButton.addEventListener("click",applyBulk);
+els.addCustomPropertyButton.addEventListener("click",()=>addCustomProperty());els.addMeasureButton.addEventListener("click",()=>addMeasure());
+els.advancedModeInput.addEventListener("change",()=>{setAdvancedMode(els.advancedModeInput.checked);updateEffectiveConfigPreview();});
+for(const input of [els.datasetNameInput,els.navigationLinksInput,els.requireAllCoordinatesInput,els.skipNullEntitiesInput,els.coordinateSourceFieldInput,els.coordinateSourceValueInput,els.coordinateOverridesInput,els.virtualProxyInput])input.addEventListener(input.type==="checkbox"?"change":"input",updateEffectiveConfigPreview);
+els.extractButton.addEventListener("click",()=>void extract());els.downloadButton.addEventListener("click",()=>void downloadResult());els.downloadDiagnosticButton.addEventListener("click",()=>void downloadDiagnostic());els.saveConfigButton.addEventListener("click",()=>void saveConfig());els.loadConfigButton.addEventListener("click",()=>void loadConfig());els.clearConfigButton.addEventListener("click",()=>void clearConfig());
 
-    const expressionField = document.createElement("label");
-    expressionField.textContent = "Expressão Qlik";
-    const expressionInput = document.createElement("input");
-    expressionInput.value = property.expression;
-    expressionInput.placeholder = "Concat(Distinct [FIELD], ', ')";
-    expressionInput.addEventListener("input", () => {
-      property.expression = expressionInput.value;
-      updateEffectiveConfigPreview();
-    });
-    expressionField.append(expressionInput);
-
-    const actions = document.createElement("div");
-    actions.className = "measure-actions";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "remove-measure";
-    remove.textContent = "Remover";
-    remove.addEventListener("click", () => {
-      customProperties = customProperties.filter((item) => item.id !== property.id);
-      renderCustomProperties();
-      updateEffectiveConfigPreview();
-    });
-    actions.append(remove);
-
-    row.append(labelField, expressionField, actions);
-    els.customPropertyList.append(row);
-  }
-}
-
-function addMeasure(measure = { label: "", expression: "" }) {
-  measures.push({ id: crypto.randomUUID(), label: measure.label ?? "", expression: measure.expression ?? "" });
-  renderMeasures();
-  updateEffectiveConfigPreview();
-}
-
-function renderMeasures() {
-  els.measureList.textContent = "";
-  for (const measure of measures) {
-    const row = document.createElement("div");
-    row.className = "measure-row";
-
-    const labelField = document.createElement("label");
-    labelField.textContent = "Rótulo";
-    const labelInput = document.createElement("input");
-    labelInput.value = measure.label;
-    labelInput.placeholder = "COUNT_RECORDS";
-    labelInput.addEventListener("input", () => {
-      measure.label = labelInput.value;
-      updateEffectiveConfigPreview();
-    });
-    labelField.append(labelInput);
-
-    const expressionField = document.createElement("label");
-    expressionField.textContent = "Expressão Qlik";
-    const expressionInput = document.createElement("input");
-    expressionInput.value = measure.expression;
-    expressionInput.placeholder = "Count(ID)";
-    expressionInput.addEventListener("input", () => {
-      measure.expression = expressionInput.value;
-      updateEffectiveConfigPreview();
-    });
-    expressionField.append(expressionInput);
-
-    const actions = document.createElement("div");
-    actions.className = "measure-actions";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "remove-measure";
-    remove.textContent = "Remover";
-    remove.addEventListener("click", () => {
-      measures = measures.filter((item) => item.id !== measure.id);
-      renderMeasures();
-      updateEffectiveConfigPreview();
-    });
-    actions.append(remove);
-
-    row.append(labelField, expressionField, actions);
-    els.measureList.append(row);
-  }
-}
-
-function parseOverrides() {
-  const text = els.coordinateOverridesInput.value.trim();
-  if (!text) return undefined;
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`JSON de correções de coordenadas inválido: ${error.message}`);
-  }
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Correções de coordenadas devem ser um objeto JSON indexado pela chave da entidade.");
-  }
-  return parsed;
-}
-
-function buildExtractionConfig() {
-  const { appId } = requiredIds();
-  const entityKey = els.entityKeySelect.value;
-  const latitudeField = els.latitudeInput.value.trim();
-  const longitudeField = els.longitudeInput.value.trim();
-  if (!entityKey) throw new Error("Escolha explicitamente a chave da entidade física.");
-  if (!latitudeField) throw new Error("Informe o campo de latitude.");
-  if (!longitudeField) throw new Error("Informe o campo de longitude.");
-
-  const validMeasures = measures
-    .map(({ label, expression }) => ({ label: label.trim(), expression: expression.trim() }))
-    .filter((item) => item.label || item.expression);
-  for (const measure of validMeasures) {
-    if (!measure.label || !measure.expression) {
-      throw new Error("Toda medida deve possuir rótulo e expressão Qlik.");
-    }
-  }
-
-  const properties = buildPropertyDefinitions(
-    [...selectedProperties.entries()],
-    customProperties
-  );
-
-  const coordinateSourceField = els.coordinateSourceFieldInput.value.trim();
-  const coordinateSourceValue = els.coordinateSourceValueInput.value.trim();
-
-  return {
-    appId,
-    name: els.datasetNameInput.value.trim() || "qlik_points",
-    entityKey,
-    latitudeField,
-    longitudeField,
-    properties,
-    measures: validMeasures,
-    navigationLinks: els.navigationLinksInput.checked,
-    requireAllCoordinates: els.requireAllCoordinatesInput.checked,
-    skipNullEntities: els.skipNullEntitiesInput.checked,
-    coordinateSourceField: coordinateSourceField || "coordinate_source",
-    coordinateSourceValue: coordinateSourceValue || "Qlik",
-    coordinateOverrides: parseOverrides()
-  };
-}
-
-function updateEffectiveConfigPreview() {
-  if (!els.effectiveConfigOutput) return;
-  try {
-    if (!inspectionReport) {
-      els.effectiveConfigOutput.textContent = "Inspecione a sheet para montar a configuração.";
-      return;
-    }
-    const config = buildExtractionConfig();
-    els.effectiveConfigOutput.textContent = pretty(config);
-  } catch (error) {
-    els.effectiveConfigOutput.textContent = `Configuração incompleta: ${error.message}`;
-  }
-}
-
-async function extract() {
-  setBusy(els.extractButton, true, "Extraindo...");
-  els.extractStatus.textContent = "Criando hypercube e buscando todas as linhas...";
-  currentResult = null;
-  setVisible(els.downloadButton, false);
-  resetResultPanels();
-
-  try {
-    const config = buildExtractionConfig();
-    els.effectiveConfigOutput.textContent = pretty(config);
-    currentResult = await runQlik("extract", config);
-    renderResult(currentResult);
-
-    const health = extractionHealth(currentResult);
-    els.extractStatus.textContent = health.message;
-    els.extractStatus.dataset.state = health.level;
-    setVisible(els.downloadButton, health.allowDownload);
-
-    if (health.level === "error") {
-      showToast(health.message, "error");
-    } else if (health.level === "warning") {
-      showToast(health.message, "error");
-    } else {
-      showToast(`${currentResult.featureCount} feição(ões) GeoJSON gerada(s).`);
-    }
-  } catch (error) {
-    els.extractStatus.textContent = error.message;
-    if (Array.isArray(error.missing) && error.missing.length) {
-      els.missingOutput.textContent = pretty(error.missing);
-      setVisible(els.missingDetails, true);
-    }
-    showToast(permissionHint(error), "error");
-  } finally {
-    setBusy(els.extractButton, false);
-  }
-}
-
-function resetResultPanels() {
-  setVisible(els.resultSummary, false);
-  setVisible(els.missingDetails, false);
-  setVisible(els.skippedDetails, false);
-  setVisible(els.previewDetails, false);
-  els.resultSummary.textContent = "";
-  els.missingOutput.textContent = "";
-  els.skippedOutput.textContent = "";
-  els.previewOutput.textContent = "";
-}
-
-function renderResult(result) {
-  const summary = [
-    [result.rowCount ?? 0, "linhas Qlik"],
-    [result.featureCount ?? 0, "feições"],
-    [result.uniqueKeys ?? 0, "chaves únicas"],
-    [result.missing?.length ?? 0, "sem coordenadas"],
-    [result.skippedNullEntityCount ?? result.skippedNullEntities?.length ?? 0, "linhas nulas ignoradas"],
-    [result.appliedOverrides?.length ?? 0, "correções aplicadas"]
-  ];
-
-  els.resultSummary.textContent = "";
-  for (const [value, label] of summary) {
-    const item = document.createElement("div");
-    item.className = "summary-item";
-    const strong = document.createElement("strong");
-    strong.textContent = String(value);
-    const span = document.createElement("span");
-    span.textContent = label;
-    item.append(strong, span);
-    els.resultSummary.append(item);
-  }
-  setVisible(els.resultSummary, true);
-
-  if (result.missing?.length) {
-    els.missingOutput.textContent = pretty(result.missing);
-    setVisible(els.missingDetails, true);
-  }
-  if (result.skippedNullEntities?.length) {
-    els.skippedOutput.textContent = pretty(result.skippedNullEntities);
-    setVisible(els.skippedDetails, true);
-  }
-
-  const preview = result.featureCollection?.features?.slice(0, 10) ?? [];
-  els.previewOutput.textContent = pretty(preview);
-  setVisible(els.previewDetails, true);
-}
-
-async function downloadResult() {
-  if (!currentResult?.featureCollection) {
-    showToast("Gere o GeoJSON antes de baixar.", "error");
-    return;
-  }
-
-  const base = safeFilename(els.datasetNameInput.value, "qlik_points");
-  const filename = base.toLowerCase().endsWith(".geojson") ? base : `${base}.geojson`;
-  const blob = new Blob([pretty(currentResult.featureCollection)], { type: "application/geo+json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  try {
-    await chrome.downloads.download({ url, filename, saveAs: true });
-    showToast("Download do GeoJSON iniciado.");
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-  }
-}
-
-async function currentStorageIdentity() {
-  const granted = await getGrantedTabContext();
-  const parsed = parseQlikSenseUrl(pageContext?.url ?? granted.url);
-  const appId = els.appIdInput.value.trim();
-  const sheetId = els.sheetIdInput.value.trim();
-  return {
-    origin: parsed.origin ?? pageContext?.origin,
-    appId,
-    sheetId
-  };
-}
-
-function serializableUiConfig() {
-  return {
-    version: 1,
-    layerIndex: selectedLayerIndex(),
-    latitudeField: els.latitudeInput.value.trim(),
-    longitudeField: els.longitudeInput.value.trim(),
-    entityKey: els.entityKeySelect.value,
-    properties: [...selectedProperties.entries()].map(([field, aggregation]) => ({ field, aggregation })),
-    customProperties: customProperties.map(({ label, expression }) => ({ label, expression })),
-    measures: measures.map(({ label, expression }) => ({ label, expression })),
-    datasetName: els.datasetNameInput.value.trim(),
-    navigationLinks: els.navigationLinksInput.checked,
-    requireAllCoordinates: els.requireAllCoordinatesInput.checked,
-    skipNullEntities: els.skipNullEntitiesInput.checked,
-    coordinateSourceField: els.coordinateSourceFieldInput.value.trim(),
-    coordinateSourceValue: els.coordinateSourceValueInput.value.trim(),
-    coordinateOverrides: els.coordinateOverridesInput.value.trim(),
-    virtualProxyPath: normalizedVirtualProxy()
-  };
-}
-
-async function saveConfig() {
-  if (!inspectionReport) {
-    showToast("Inspecione a sheet antes de salvar a configuração.", "error");
-    return;
-  }
-  const identity = await currentStorageIdentity();
-  const key = configStorageKey(identity);
-  if (!key) {
-    showToast("Não foi possível identificar app/sheet para salvar.", "error");
-    return;
-  }
-  await chrome.storage.local.set({ [key]: serializableUiConfig() });
-  showToast("Configuração salva localmente no Chrome.");
-}
-
-async function loadConfig() {
-  if (!inspectionReport) {
-    showToast("Inspecione a sheet antes de carregar a configuração.", "error");
-    return;
-  }
-  const identity = await currentStorageIdentity();
-  const key = configStorageKey(identity);
-  if (!key) return;
-  const stored = (await chrome.storage.local.get(key))[key];
-  if (!stored) {
-    showToast("Nenhuma configuração salva para este app/sheet.", "error");
-    return;
-  }
-
-  const layerIndex = Number.isInteger(stored.layerIndex) && inspectionReport.pointLayers[stored.layerIndex]
-    ? stored.layerIndex : 0;
-  els.layerSelect.value = String(layerIndex);
-  applyLayer(layerIndex);
-  if (stored.latitudeField && [...els.latitudeInput.options].some((option) => option.value === stored.latitudeField)) {
-    els.latitudeInput.value = stored.latitudeField;
-  }
-  if (stored.longitudeField && [...els.longitudeInput.options].some((option) => option.value === stored.longitudeField)) {
-    els.longitudeInput.value = stored.longitudeField;
-  }
-  renderEntityOptions(layerIndex, stored.entityKey ?? "");
-
-  selectedProperties = new Map((stored.properties ?? [])
-    .filter((item) => inspectionReport.fields.some((field) => field.name === item.field))
-    .map((item) => [item.field, item.aggregation ?? "only"]));
-  customProperties = (stored.customProperties ?? []).map((item) => ({ id: crypto.randomUUID(), ...item }));
-  measures = (stored.measures ?? []).map((item) => ({ id: crypto.randomUUID(), ...item }));
-  els.datasetNameInput.value = stored.datasetName ?? "qlik_points";
-  els.navigationLinksInput.checked = Boolean(stored.navigationLinks);
-  els.requireAllCoordinatesInput.checked = stored.requireAllCoordinates !== false;
-  els.skipNullEntitiesInput.checked = stored.skipNullEntities !== false;
-  els.coordinateSourceFieldInput.value = stored.coordinateSourceField ?? "coordinate_source";
-  els.coordinateSourceValueInput.value = stored.coordinateSourceValue ?? "Qlik";
-  els.coordinateOverridesInput.value = stored.coordinateOverrides ?? "";
-  if (typeof stored.virtualProxyPath === "string") els.virtualProxyInput.value = stored.virtualProxyPath;
-  renderFieldList();
-  renderCustomProperties();
-  renderMeasures();
-  updateEffectiveConfigPreview();
-  showToast("Configuração carregada.");
-}
-
-async function clearConfig() {
-  const identity = await currentStorageIdentity();
-  const key = configStorageKey(identity);
-  if (!key) return;
-  await chrome.storage.local.remove(key);
-  showToast("Configuração salva removida.");
-  await refreshSavedConfigAvailability();
-}
-
-async function refreshSavedConfigAvailability() {
-  try {
-    const identity = await currentStorageIdentity();
-    const key = configStorageKey(identity);
-    if (!key) return;
-    const exists = Boolean((await chrome.storage.local.get(key))[key]);
-    els.loadConfigButton.disabled = !exists;
-    els.clearConfigButton.disabled = !exists;
-  } catch {
-    els.loadConfigButton.disabled = true;
-    els.clearConfigButton.disabled = true;
-  }
-}
-
-els.hostAccessButton.addEventListener("click", requestOrRemoveCurrentHostAccess);
-els.detectButton.addEventListener("click", () => { void detectContext(); });
-els.probeButton.addEventListener("click", () => { void probe(); });
-els.inspectButton.addEventListener("click", () => { void inspect(); });
-els.layerSelect.addEventListener("change", () => applyLayer(selectedLayerIndex()));
-els.latitudeInput.addEventListener("change", updateEffectiveConfigPreview);
-els.longitudeInput.addEventListener("change", updateEffectiveConfigPreview);
-els.entityKeySelect.addEventListener("change", updateEffectiveConfigPreview);
-els.fieldSearchInput.addEventListener("input", renderFieldList);
-els.addCustomPropertyButton.addEventListener("click", () => addCustomProperty());
-els.addMeasureButton.addEventListener("click", () => addMeasure());
-for (const input of [
-  els.datasetNameInput, els.navigationLinksInput, els.requireAllCoordinatesInput, els.skipNullEntitiesInput,
-  els.coordinateSourceFieldInput, els.coordinateSourceValueInput, els.coordinateOverridesInput, els.virtualProxyInput
-]) {
-  input.addEventListener(input.type === "checkbox" ? "change" : "input", updateEffectiveConfigPreview);
-}
-els.extractButton.addEventListener("click", () => { void extract(); });
-els.downloadButton.addEventListener("click", () => { void downloadResult(); });
-els.saveConfigButton.addEventListener("click", () => { void saveConfig(); });
-els.loadConfigButton.addEventListener("click", () => { void loadConfig(); });
-els.clearConfigButton.addEventListener("click", () => { void clearConfig(); });
-
-void detectContext({ quiet: true }).catch(() => {});
+setAdvancedMode(false);
+void detectContext({quiet:true}).catch(()=>{});

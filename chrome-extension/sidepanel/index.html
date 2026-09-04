@@ -12,7 +12,13 @@
       <h1>Qlik GeoJSON Extractor</h1>
       <p>Inspecione um PointLayer, escolha a entidade física e gere GeoJSON.</p>
     </div>
-    <span id="connectionBadge" class="badge neutral">não testado</span>
+    <div class="header-actions">
+      <label class="mode-toggle" title="Exibe opções técnicas adicionais">
+        <input id="advancedModeInput" type="checkbox">
+        <span>Modo avançado</span>
+      </label>
+      <span id="connectionBadge" class="badge neutral">não testado</span>
+    </div>
   </header>
 
   <main>
@@ -30,14 +36,17 @@
         <button id="hostAccessButton" class="secondary" type="button">Permitir acesso a este site</button>
       </div>
       <p class="hint">O Chrome pedirá acesso somente ao host Qlik atual. A extensão não recebe acesso automático a todos os sites.</p>
-      <label>App ID
-        <input id="appIdInput" autocomplete="off" spellcheck="false">
-      </label>
-      <label>Sheet ID
-        <input id="sheetIdInput" autocomplete="off" spellcheck="false">
-      </label>
-      <label>Virtual proxy
-        <input id="virtualProxyInput" placeholder="vazio ou /finance" autocomplete="off" spellcheck="false">
+      <div class="grid two">
+        <label>ID do app
+          <input id="appIdInput" autocomplete="off" spellcheck="false">
+        </label>
+        <label>ID da sheet
+          <input id="sheetIdInput" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <label class="advanced-only">Proxy virtual
+        <input id="virtualProxyInput" autocomplete="off" spellcheck="false">
+        <span class="hint inline">Normalmente vazio. Quando existe, é detectado da URL, por exemplo <code>/finance</code>.</span>
       </label>
       <div class="button-row">
         <button id="probeButton" type="button">Testar conexão</button>
@@ -60,7 +69,7 @@
           <select id="longitudeInput"></select>
         </label>
       </div>
-      <p class="hint">Os campos de coordenadas devem ser campos reais do app. O valor detectado no PointLayer é priorizado, mas pode ser alterado explicitamente.</p>
+      <p class="hint">A configuração do próprio PointLayer é priorizada. Campos simples são validados; expressões Qlik são preservadas sem tentar adivinhar um campo equivalente.</p>
 
       <div id="layerDiagnostic" class="diagnostic"></div>
 
@@ -69,7 +78,8 @@
           <option value="">Escolha explicitamente...</option>
         </select>
       </label>
-      <p class="hint">A ferramenta sugere candidatos, mas não escolhe a chave silenciosamente.</p>
+      <div id="entityKeyAssessment" class="candidate-assessment"></div>
+      <p class="hint">A ferramenta recomenda candidatos com base em evidências espaciais e semânticas, mas nunca escolhe a chave silenciosamente.</p>
     </section>
 
     <section id="propertiesSection" class="card hidden">
@@ -78,19 +88,37 @@
         <span id="selectedPropertyCount" class="badge neutral">0 selecionadas</span>
       </div>
       <input id="fieldSearchInput" type="search" placeholder="Filtrar campos..." autocomplete="off">
+      <div class="button-row wrap compact-actions">
+        <button id="selectFilteredButton" class="secondary" type="button">Selecionar filtrados</button>
+        <button id="selectRelatedButton" class="secondary" type="button">Selecionar relacionados</button>
+        <button id="clearPropertiesButton" class="secondary" type="button">Limpar seleção</button>
+      </div>
+      <div class="bulk-row">
+        <label>Agregação em lote
+          <select id="bulkAggregationSelect">
+            <option value="only">Somente um valor (Only)</option>
+            <option value="concat">Concatenar distintos</option>
+            <option value="max">Máximo</option>
+            <option value="min">Mínimo</option>
+            <option value="maxTimestamp">Data/hora mais recente</option>
+          </select>
+        </label>
+        <button id="applyBulkAggregationButton" class="secondary" type="button">Aplicar aos selecionados</button>
+      </div>
+      <p id="bulkWarning" class="hint"></p>
       <div id="fieldList" class="field-list"></div>
     </section>
 
-    <section id="customPropertiesSection" class="card hidden">
+    <section id="customPropertiesSection" class="card hidden advanced-only">
       <div class="section-title">
         <h2>4. Expressões de propriedade</h2>
         <button id="addCustomPropertyButton" class="secondary" type="button">Adicionar expressão</button>
       </div>
-      <p class="hint">Opcional. Use quando precisar reproduzir algo como <code>{ label: "LABEL", expression: "Concat(Distinct [FIELD], ', ')" }</code>.</p>
+      <p class="hint">Opcional. Use quando precisar reproduzir uma expressão Qlik personalizada.</p>
       <div id="customPropertyList"></div>
     </section>
 
-    <section id="measuresSection" class="card hidden">
+    <section id="measuresSection" class="card hidden advanced-only">
       <div class="section-title">
         <h2>5. Medidas</h2>
         <button id="addMeasureButton" class="secondary" type="button">Adicionar medida</button>
@@ -108,34 +136,37 @@
         <input id="navigationLinksInput" type="checkbox">
         <span>Adicionar links Google Maps e Waze</span>
       </label>
-      <label class="check-line">
-        <input id="requireAllCoordinatesInput" type="checkbox" checked>
-        <span>Falhar se uma entidade real estiver sem coordenadas</span>
-      </label>
-      <label class="check-line">
-        <input id="skipNullEntitiesInput" type="checkbox" checked>
-        <span>Ignorar linhas cuja dimensão Qlik seja nula</span>
-      </label>
 
-      <div class="grid two">
-        <label>Campo de origem da coordenada
-          <input id="coordinateSourceFieldInput" value="coordinate_source" autocomplete="off" spellcheck="false">
+      <div class="advanced-only">
+        <label class="check-line">
+          <input id="requireAllCoordinatesInput" type="checkbox" checked>
+          <span>Falhar se uma entidade real estiver sem coordenadas</span>
         </label>
-        <label>Valor da origem da coordenada
-          <input id="coordinateSourceValueInput" value="Qlik" autocomplete="off" spellcheck="false">
+        <label class="check-line">
+          <input id="skipNullEntitiesInput" type="checkbox" checked>
+          <span>Ignorar linhas cuja dimensão Qlik seja nula</span>
         </label>
+
+        <div class="grid two">
+          <label>Campo de origem da coordenada
+            <input id="coordinateSourceFieldInput" value="coordinate_source" autocomplete="off" spellcheck="false">
+          </label>
+          <label>Valor da origem da coordenada
+            <input id="coordinateSourceValueInput" value="Qlik" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+
+        <details>
+          <summary>Correções explícitas de coordenadas</summary>
+          <p class="hint">JSON opcional. Use somente para correções documentadas.</p>
+          <textarea id="coordinateOverridesInput" rows="8" spellcheck="false" placeholder='{"ENTITY_KEY":{"latitude":-15.8,"longitude":-48.1,"source":"manual"}}'></textarea>
+        </details>
+
+        <details id="effectiveConfigDetails">
+          <summary>Configuração efetiva enviada ao extrator</summary>
+          <pre id="effectiveConfigOutput" class="output compact"></pre>
+        </details>
       </div>
-
-      <details>
-        <summary>Correções explícitas de coordenadas</summary>
-        <p class="hint">JSON opcional. Use somente para correções documentadas.</p>
-        <textarea id="coordinateOverridesInput" rows="8" spellcheck="false" placeholder='{"ENTITY_KEY":{"latitude":-15.8,"longitude":-48.1,"source":"manual"}}'></textarea>
-      </details>
-
-      <details id="effectiveConfigDetails">
-        <summary>Configuração efetiva que será enviada ao extrator</summary>
-        <pre id="effectiveConfigOutput" class="output compact"></pre>
-      </details>
 
       <div class="button-row wrap">
         <button id="saveConfigButton" class="secondary" type="button">Salvar configuração</button>
@@ -146,6 +177,7 @@
 
     <section id="extractSection" class="card hidden">
       <h2>7. Extrair</h2>
+      <div id="readinessPanel" class="readiness"></div>
       <button id="extractButton" class="primary wide" type="button">Gerar GeoJSON</button>
       <div id="extractStatus" class="status-line"></div>
       <div id="resultSummary" class="summary-grid hidden"></div>
@@ -161,17 +193,19 @@
         <summary>Pré-visualização das primeiras feições</summary>
         <pre id="previewOutput" class="output"></pre>
       </details>
-      <button id="downloadButton" class="primary wide hidden" type="button">Baixar GeoJSON</button>
+      <div class="button-row wrap">
+        <button id="downloadButton" class="primary hidden" type="button">Baixar GeoJSON</button>
+        <button id="downloadDiagnosticButton" class="secondary hidden" type="button">Baixar relatório de diagnóstico</button>
+      </div>
     </section>
 
     <section class="card privacy">
       <h2>Privacidade</h2>
-      <p>A extensão solicita acesso somente ao host Qlik escolhido pelo usuário, em tempo de execução. O manifesto declara hosts HTTP/HTTPS apenas como permissões opcionais; nenhum host é concedido automaticamente na instalação. A extensão não envia dados a servidores externos e armazena somente configurações, nunca o GeoJSON extraído.</p>
+      <p>A extensão solicita acesso somente ao host Qlik escolhido pelo usuário, em tempo de execução. Não envia dados a servidores externos e armazena somente configurações, nunca o GeoJSON extraído.</p>
     </section>
   </main>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-
   <script type="module" src="app.js"></script>
 </body>
 </html>
